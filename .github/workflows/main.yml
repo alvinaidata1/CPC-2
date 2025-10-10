@@ -11,15 +11,9 @@ jobs:
     steps:
       - name: Configure Core RDP Settings
         run: |
-          # Enable Remote Desktop and disable Network Level Authentication
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
-                             -Name "fDenyTSConnections" -Value 0 -Force
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
-                             -Name "UserAuthentication" -Value 0 -Force
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
-                             -Name "SecurityLayer" -Value 0 -Force
-
-          # Firewall rule for RDP
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "SecurityLayer" -Value 0 -Force
           netsh advfirewall firewall delete rule name="RDP-Tailscale"
           netsh advfirewall firewall add rule name="RDP-Tailscale" dir=in action=allow protocol=TCP localport=3389
           Restart-Service -Name TermService -Force
@@ -29,50 +23,32 @@ jobs:
           $username = "${{ secrets.NAME }}"
           $password = "${{ secrets.PASS }}"
 
-          # Disable password complexity policy so any password works
           secedit /export /cfg $env:TEMP\secpol.cfg
           (Get-Content $env:TEMP\secpol.cfg).Replace("PasswordComplexity = 1", "PasswordComplexity = 0") | Set-Content $env:TEMP\secpol.cfg
           secedit /configure /db secedit.sdb /cfg $env:TEMP\secpol.cfg /areas SECURITYPOLICY
           gpupdate /force
 
           $securePass = ConvertTo-SecureString $password -AsPlainText -Force
-
-          # Create the user if not exists
           if (-not (Get-LocalUser -Name $username -ErrorAction SilentlyContinue)) {
               New-LocalUser -Name $username -Password $securePass -AccountNeverExpires
           }
-
-          # Add to required groups
           Add-LocalGroupMember -Group "Administrators" -Member $username
           Add-LocalGroupMember -Group "Remote Desktop Users" -Member $username
-
-          # Remove the default "RDP" account if present
           if (Get-LocalUser -Name "RDP" -ErrorAction SilentlyContinue) {
               Remove-LocalUser -Name "RDP"
           }
 
-          # Registry tweak: hide all users except our custom one
           $regPath = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon\SpecialAccounts\UserList"
-          if (-not (Test-Path $regPath)) {
-              New-Item -Path $regPath -Force | Out-Null
-          }
-
-          # Hide all users
+          if (-not (Test-Path $regPath)) { New-Item -Path $regPath -Force | Out-Null }
           Get-LocalUser | ForEach-Object {
               New-ItemProperty -Path $regPath -Name $_.Name -Value 0 -PropertyType DWord -Force
           }
-
-          # Unhide only the chosen user
           New-ItemProperty -Path $regPath -Name $username -Value 1 -PropertyType DWord -Force
-
           echo "RDP_CREDS=User: $username | Password: $password" >> $env:GITHUB_ENV
 
       - name: Clean Azure/Assure/Unity Shortcuts
         run: |
-          # Remove Azure / Assure / Unity shortcuts from Desktop
           Get-ChildItem "C:\Users\Public\Desktop" | Where-Object { $_.Name -match "Azure|Assure|Unity" } | Remove-Item -Force -Recurse -ErrorAction SilentlyContinue
-
-          # Remove Azure / Assure / Unity items from Start Menu (Public Programs)
           Get-ChildItem "C:\ProgramData\Microsoft\Windows\Start Menu\Programs" -Recurse | Where-Object { $_.Name -match "Azure|Assure|Unity" } | Remove-Item -Force -Recurse -ErrorAction SilentlyContinue
 
       - name: Install Tailscale
@@ -101,6 +77,41 @@ jobs:
           if (-not $testResult.TcpTestSucceeded) { Write-Error "TCP 3389 failed"; exit 1 }
           Write-Host "TCP connectivity successful!"
 
+      - name: Install VS Code, Git, Firefox
+        run: |
+          # VS Code
+          Invoke-WebRequest https://aka.ms/win32-x64-user-stable -OutFile vscode_installer.exe
+          Start-Process vscode_installer.exe -ArgumentList '/silent','/mergetasks=!runcode' -Wait
+
+          # Git
+          Invoke-WebRequest https://github.com/git-for-windows/git/releases/latest/download/Git-64-bit.exe -OutFile git_installer.exe
+          Start-Process git_installer.exe -ArgumentList '/VERYSILENT' -Wait
+
+          # Firefox
+          Invoke-WebRequest "https://download.mozilla.org/?product=firefox-latest&os=win64&lang=en-US" -OutFile firefox_installer.exe
+          Start-Process firefox_installer.exe -ArgumentList "/silent" -Wait
+
+      - name: Configure Taskbar and Default Browser
+        run: |
+          # Remove Edge from taskbar
+          $edgePath = "$env:APPDATA\Microsoft\Internet Explorer\Quick Launch\User Pinned\TaskBar\Microsoft Edge.lnk"
+          if (Test-Path $edgePath) { Remove-Item $edgePath -Force }
+
+          # Pin Firefox first, then VS Code
+          $shell = New-Object -ComObject Shell.Application
+          $firefox = "$Env:ProgramFiles\Mozilla Firefox\firefox.exe"
+          $vscode = "$Env:ProgramFiles\Microsoft VS Code\Code.exe"
+          $shell.Namespace((Split-Path $firefox)).ParseName((Split-Path $firefox -Leaf)).InvokeVerb('taskbarpin')
+          Start-Sleep -Seconds 2
+          $shell.Namespace((Split-Path $vscode)).ParseName((Split-Path $vscode -Leaf)).InvokeVerb('taskbarpin')
+
+          # Set Firefox as default
+          Start-Process "$Env:ProgramFiles\Mozilla Firefox\firefox.exe" -ArgumentList "-setDefaultBrowser" -Wait
+
+          # Auto-open Gmail, GitHub, Discord on login
+          $startup = "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\Startup\open_firefox.bat"
+          'start "" "C:\Program Files\Mozilla Firefox\firefox.exe" "https://gmail.com" "https://github.com" "https://discord.com/app"' | Out-File -Encoding ASCII $startup
+
       - name: Maintain Connection
         run: |
           Write-Host "`n=== RDP ACCESS ==="
@@ -112,4 +123,3 @@ jobs:
               Write-Host "[$(Get-Date)] RDP Active - Use Ctrl+C in workflow to terminate"
               Start-Sleep -Seconds 300
           }
-          
