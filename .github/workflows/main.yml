@@ -11,15 +11,12 @@ jobs:
     steps:
       - name: Configure Core RDP Settings
         run: |
-          # Enable Remote Desktop and disable Network Level Authentication
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
                              -Name "fDenyTSConnections" -Value 0 -Force
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
                              -Name "UserAuthentication" -Value 0 -Force
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
                              -Name "SecurityLayer" -Value 0 -Force
-
-          # Firewall rule for RDP
           netsh advfirewall firewall delete rule name="RDP-Tailscale"
           netsh advfirewall firewall add rule name="RDP-Tailscale" dir=in action=allow protocol=TCP localport=3389
           Restart-Service -Name TermService -Force
@@ -28,89 +25,92 @@ jobs:
         run: |
           $username = "${{ secrets.NAME }}"
           $password = "${{ secrets.PASS }}"
-
-          # Disable password complexity policy so any password works
           secedit /export /cfg $env:TEMP\secpol.cfg
           (Get-Content $env:TEMP\secpol.cfg).Replace("PasswordComplexity = 1", "PasswordComplexity = 0") | Set-Content $env:TEMP\secpol.cfg
           secedit /configure /db secedit.sdb /cfg $env:TEMP\secpol.cfg /areas SECURITYPOLICY
           gpupdate /force
-
           $securePass = ConvertTo-SecureString $password -AsPlainText -Force
-
-          # Create the user if not exists
           if (-not (Get-LocalUser -Name $username -ErrorAction SilentlyContinue)) {
               New-LocalUser -Name $username -Password $securePass -AccountNeverExpires
           }
-
-          # Add to required groups
           Add-LocalGroupMember -Group "Administrators" -Member $username
           Add-LocalGroupMember -Group "Remote Desktop Users" -Member $username
-
-          # Remove the default "RDP" account if present
           if (Get-LocalUser -Name "RDP" -ErrorAction SilentlyContinue) {
               Remove-LocalUser -Name "RDP"
           }
-
-          # Registry tweak: hide all users except our custom one
           $regPath = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon\SpecialAccounts\UserList"
           if (-not (Test-Path $regPath)) {
               New-Item -Path $regPath -Force | Out-Null
           }
-
-          # Hide all users
           Get-LocalUser | ForEach-Object {
               New-ItemProperty -Path $regPath -Name $_.Name -Value 0 -PropertyType DWord -Force
           }
-
-          # Unhide only the chosen user
           New-ItemProperty -Path $regPath -Name $username -Value 1 -PropertyType DWord -Force
-
           echo "RDP_CREDS=User: $username | Password: $password" >> $env:GITHUB_ENV
 
       - name: Clean Azure/Assure/Unity Shortcuts
         run: |
-          # Remove Azure / Assure / Unity shortcuts from Desktop
           Get-ChildItem "C:\Users\Public\Desktop" | Where-Object { $_.Name -match "Azure|Assure|Unity" } | Remove-Item -Force -Recurse -ErrorAction SilentlyContinue
-
-          # Remove Azure / Assure / Unity items from Start Menu (Public Programs)
           Get-ChildItem "C:\ProgramData\Microsoft\Windows\Start Menu\Programs" -Recurse | Where-Object { $_.Name -match "Azure|Assure|Unity" } | Remove-Item -Force -Recurse -ErrorAction SilentlyContinue
 
-      - name: Install Tailscale
+      - name: Install Git
         run: |
-          $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
-          $installerPath = "$env:TEMP\tailscale.msi"
-          Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath
-          Start-Process msiexec.exe -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" -Wait
+          $gitUrl = "https://github.com/git-for-windows/git/releases/download/v2.51.0.windows.2/Git-2.51.0-64-bit.exe"
+          $installerPath = "$env:TEMP\git-installer.exe"
+          Invoke-WebRequest -Uri $gitUrl -OutFile $installerPath
+          Start-Process $installerPath -ArgumentList "/VERYSILENT", "/NORESTART" -Wait
           Remove-Item $installerPath -Force
 
-      - name: Establish Tailscale Connection
+      - name: Install Visual Studio Code
         run: |
-          & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=gh-runner-$env:GITHUB_RUN_ID
-          $tsIP = $null; $retries = 0
-          while (-not $tsIP -and $retries -lt 10) {
-              $tsIP = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
-              Start-Sleep -Seconds 5; $retries++
+          $vscodeUrl = "https://update.code.visualstudio.com/1.105.0/win32-x64-user/stable"
+          $installerPath = "$env:TEMP\vscode-installer.exe"
+          Invoke-WebRequest -Uri $vscodeUrl -OutFile $installerPath
+          Start-Process $installerPath -ArgumentList "/VERYSILENT", "/NORESTART" -Wait
+          Remove-Item $installerPath -Force
+
+      - name: Unpin Microsoft Edge from Taskbar
+        run: |
+          $edgeAppId = "Microsoft.MicrosoftEdge_8wekyb3d8bbwe!MicrosoftEdge"
+          $taskbarPinPath = [System.IO.Path]::Combine($env:APPDATA, 'Microsoft\Internet Explorer\Quick Launch\User Pinned\TaskBar')
+          $edgeShortcut = [System.IO.Path]::Combine($taskbarPinPath, 'Microsoft Edge.lnk')
+          if (Test-Path $edgeShortcut) {
+              Remove-Item $edgeShortcut -Force
           }
-          if (-not $tsIP) { Write-Error "Tailscale IP not assigned. Exiting."; exit 1 }
-          echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
 
-      - name: Verify RDP Accessibility
+      - name: Pin Firefox to Taskbar
         run: |
-          Write-Host "Tailscale IP: $env:TAILSCALE_IP"
-          $testResult = Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port 3389
-          if (-not $testResult.TcpTestSucceeded) { Write-Error "TCP 3389 failed"; exit 1 }
-          Write-Host "TCP connectivity successful!"
-
-      - name: Maintain Connection
-        run: |
-          Write-Host "`n=== RDP ACCESS ==="
-          Write-Host "Address: $env:TAILSCALE_IP"
-          Write-Host "Username: $(${env:RDP_CREDS}.Split('|')[0].Split(':')[1].Trim())"
-          Write-Host "Password: $(${env:RDP_CREDS}.Split('|')[1].Split(':')[1].Trim())"
-          Write-Host "==================`n"
-          while ($true) {
-              Write-Host "[$(Get-Date)] RDP Active - Use Ctrl+C in workflow to terminate"
-              Start-Sleep -Seconds 300
+          $firefoxPath = "C:\Program Files\Mozilla Firefox\firefox.exe"
+          if (Test-Path $firefoxPath) {
+              $shell = New-Object -ComObject Shell.Application
+              $folder = $shell.Namespace((Get-Item $firefoxPath).DirectoryName)
+              $file = $folder.ParseName((Get-Item $firefoxPath).Name)
+              $file.InvokeVerb('taskbarpin')
           }
-          
 
+      - name: Pin Visual Studio Code to Taskbar
+        run: |
+          $vscodePath = "C:\Program Files\Microsoft VS Code\Code.exe"
+          if (Test-Path $vscodePath) {
+              $shell = New-Object -ComObject Shell.Application
+              $folder = $shell.Namespace((Get-Item $vscodePath).DirectoryName)
+              $file = $folder.ParseName((Get-Item $vscodePath).Name)
+              $file.InvokeVerb('taskbarpin')
+          }
+
+      - name: Set Firefox as Default Browser
+        run: |
+          $firefoxPath = "C:\Program Files\Mozilla Firefox\firefox.exe"
+          if (Test-Path $firefoxPath) {
+              $firefox = New-Object -ComObject "Shell.Application"
+              $firefox.ShellExecute($firefoxPath, "", "", "open", 1)
+          }
+
+      - name: Launch Firefox Maximized with GitHub and Discord Tabs
+        run: |
+          $firefoxPath = "C:\Program Files\Mozilla Firefox\firefox.exe"
+          $githubUrl = "https://github.com"
+          $discordUrl = "https://discord.com/app"
+          if (Test-Path $firefoxPath) {
+              Start-Process $firefoxPath -ArgumentList "--new-window", "--start-maximized", $githubUrl, $discordUrl
+          }
