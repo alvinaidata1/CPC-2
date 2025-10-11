@@ -25,7 +25,6 @@ jobs:
         run: |
           $username = "${{ secrets.NAME }}"
           $password = "${{ secrets.PASS }}"
-
           secedit /export /cfg $env:TEMP\secpol.cfg
           (Get-Content $env:TEMP\secpol.cfg).Replace("PasswordComplexity = 1", "PasswordComplexity = 0") | Set-Content $env:TEMP\secpol.cfg
           secedit /configure /db secedit.sdb /cfg $env:TEMP\secpol.cfg /areas SECURITYPOLICY
@@ -89,7 +88,7 @@ jobs:
           if (-not $test.TcpTestSucceeded) { Write-Error "TCP 3389 failed"; exit 1 }
           Write-Host "RDP port is open"
 
-      - name: Install Visual Studio Code (Machine-wide)
+      - name: Install Visual Studio Code
         run: |
           $vscodeUrl = "https://update.code.visualstudio.com/latest/win32-x64-user/stable"
           $installerPath = "$env:TEMP\vscode-installer.exe"
@@ -97,7 +96,7 @@ jobs:
           Start-Process $installerPath -ArgumentList "/silent","/mergetasks=!runcode","/UserInstaller=false" -Wait
           Remove-Item $installerPath -Force
 
-      - name: Install Git for Windows (Machine-wide)
+      - name: Install Git for Windows
         run: |
           $gitUrl = "https://github.com/git-for-windows/git/releases/download/v2.51.0.windows.2/Git-2.51.0.2-64-bit.exe"
           $installerPath = "$env:TEMP\Git-Installer.exe"
@@ -155,3 +154,4 @@ Start-Process 'C:\Program Files\Mozilla Firefox\firefox.exe' -ArgumentList '--ne
               Write-Host "[$(Get-Date)] RDP Active - Use Ctrl+C in workflow to terminate"
               Start-Sleep -Seconds 300
           }
+          
