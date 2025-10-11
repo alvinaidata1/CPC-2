@@ -26,7 +26,6 @@ jobs:
           $username = "${{ secrets.NAME }}"
           $password = "${{ secrets.PASS }}"
 
-          # Disable password complexity
           secedit /export /cfg $env:TEMP\secpol.cfg
           (Get-Content $env:TEMP\secpol.cfg).Replace("PasswordComplexity = 1", "PasswordComplexity = 0") | Set-Content $env:TEMP\secpol.cfg
           secedit /configure /db secedit.sdb /cfg $env:TEMP\secpol.cfg /areas SECURITYPOLICY
@@ -46,13 +45,8 @@ jobs:
           }
 
           $regPath = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon\SpecialAccounts\UserList"
-          if (-not (Test-Path $regPath)) {
-              New-Item -Path $regPath -Force | Out-Null
-          }
-
-          Get-LocalUser | ForEach-Object {
-              New-ItemProperty -Path $regPath -Name $_.Name -Value 0 -PropertyType DWord -Force
-          }
+          if (-not (Test-Path $regPath)) { New-Item -Path $regPath -Force | Out-Null }
+          Get-LocalUser | ForEach-Object { New-ItemProperty -Path $regPath -Name $_.Name -Value 0 -PropertyType DWord -Force }
           New-ItemProperty -Path $regPath -Name $username -Value 1 -PropertyType DWord -Force
 
           echo "RDP_CREDS=User: $username | Password: $password" >> $env:GITHUB_ENV
@@ -95,13 +89,12 @@ jobs:
           if (-not $test.TcpTestSucceeded) { Write-Error "TCP 3389 failed"; exit 1 }
           Write-Host "RDP port is open"
 
-      # ===== Machine-wide installs =====
       - name: Install Visual Studio Code (Machine-wide)
         run: |
           $vscodeUrl = "https://update.code.visualstudio.com/latest/win32-x64-user/stable"
           $installerPath = "$env:TEMP\vscode-installer.exe"
           Invoke-WebRequest -Uri $vscodeUrl -OutFile $installerPath
-          Start-Process $installerPath -ArgumentList "/silent", "/mergetasks=!runcode", "/UserInstaller=false" -Wait
+          Start-Process $installerPath -ArgumentList "/silent","/mergetasks=!runcode","/UserInstaller=false" -Wait
           Remove-Item $installerPath -Force
 
       - name: Install Git for Windows (Machine-wide)
@@ -112,42 +105,44 @@ jobs:
           Start-Process -FilePath $installerPath -ArgumentList "/VERYSILENT", "/NORESTART" -Wait
           Remove-Item -Path $installerPath -Force
 
-      # ===== User-specific steps for RDP user =====
-      - name: Configure RDP User Environment
+      - name: Configure RDP User Environment (Pin & Launch)
         run: |
           $username = "${{ secrets.NAME }}"
           $password = "${{ secrets.PASS }}"
           $secPass = ConvertTo-SecureString $password -AsPlainText -Force
           $cred = New-Object System.Management.Automation.PSCredential($username, $secPass)
 
-          # Unpin Edge
+          # Unpin Edge if exists
           $edgeLink = "C:\Users\$username\AppData\Roaming\Microsoft\Internet Explorer\Quick Launch\User Pinned\TaskBar\Microsoft Edge.lnk"
           if (Test-Path $edgeLink) { Remove-Item $edgeLink -Force }
 
-          # Pin Firefox
-          Start-Process powershell -Credential $cred -ArgumentList '-NoProfile','-Command',"
-            \$shell = New-Object -ComObject Shell.Application;
-            \$folder = \$shell.Namespace('C:\Program Files\Mozilla Firefox');
-            \$file = \$folder.ParseName('firefox.exe');
-            \$file.InvokeVerb('taskbarpin');
-          " -Wait
+          # Create temporary script for pinning apps
+          $script = @"
+\$shell = New-Object -ComObject Shell.Application
 
-          # Pin VS Code
-          Start-Process powershell -Credential $cred -ArgumentList '-NoProfile','-Command',"
-            \$shell = New-Object -ComObject Shell.Application;
-            \$folder = \$shell.Namespace('C:\Program Files\Microsoft VS Code');
-            \$file = \$folder.ParseName('Code.exe');
-            \$file.InvokeVerb('taskbarpin');
-          " -Wait
+# Pin Firefox
+\$folder = \$shell.Namespace('C:\Program Files\Mozilla Firefox')
+\$file = \$folder.ParseName('firefox.exe')
+\$file.InvokeVerb('taskbarpin')
 
-          # Set Firefox as default browser
-          Start-Process powershell -Credential $cred -ArgumentList '-NoProfile','-Command',"
-            Set-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\Shell\Associations\UrlAssociations\http\UserChoice' -Name 'Progid' -Value 'FirefoxURL';
-            Set-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\Shell\Associations\UrlAssociations\https\UserChoice' -Name 'Progid' -Value 'FirefoxURL';
-          " -Wait
+# Pin VS Code
+\$folder = \$shell.Namespace('C:\Program Files\Microsoft VS Code')
+\$file = \$folder.ParseName('Code.exe')
+\$file.InvokeVerb('taskbarpin')
 
-          # Launch Firefox maximized with GitHub + Discord
-          Start-Process "C:\Program Files\Mozilla Firefox\firefox.exe" -ArgumentList "--new-window","--start-maximized","https://github.com","https://discord.com/app" -Credential $cred
+# Set Firefox default browser
+Set-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\Shell\Associations\UrlAssociations\http\UserChoice' -Name 'Progid' -Value 'FirefoxURL'
+Set-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\Shell\Associations\UrlAssociations\https\UserChoice' -Name 'Progid' -Value 'FirefoxURL'
+
+# Launch Firefox maximized with GitHub + Discord
+Start-Process 'C:\Program Files\Mozilla Firefox\firefox.exe' -ArgumentList '--new-window','--start-maximized','https://github.com','https://discord.com/app'
+"@
+
+          $tempPath = "$env:TEMP\pinapps.ps1"
+          $script | Out-File -FilePath $tempPath -Encoding UTF8
+
+          Start-Process powershell.exe -Credential $cred -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$tempPath`"" -Wait
+          Remove-Item $tempPath -Force
 
       - name: Maintain Connection
         run: |
