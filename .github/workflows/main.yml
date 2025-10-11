@@ -11,12 +11,15 @@ jobs:
     steps:
       - name: Configure Core RDP Settings
         run: |
+          # Enable Remote Desktop & disable NLA
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
                              -Name "fDenyTSConnections" -Value 0 -Force
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
                              -Name "UserAuthentication" -Value 0 -Force
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
                              -Name "SecurityLayer" -Value 0 -Force
+
+          # Firewall rule for RDP
           netsh advfirewall firewall delete rule name="RDP-Tailscale"
           netsh advfirewall firewall add rule name="RDP-Tailscale" dir=in action=allow protocol=TCP localport=3389
           Restart-Service -Name TermService -Force
@@ -25,27 +28,36 @@ jobs:
         run: |
           $username = "${{ secrets.NAME }}"
           $password = "${{ secrets.PASS }}"
+
+          # disable password complexity
           secedit /export /cfg $env:TEMP\secpol.cfg
           (Get-Content $env:TEMP\secpol.cfg).Replace("PasswordComplexity = 1", "PasswordComplexity = 0") | Set-Content $env:TEMP\secpol.cfg
           secedit /configure /db secedit.sdb /cfg $env:TEMP\secpol.cfg /areas SECURITYPOLICY
           gpupdate /force
+
           $securePass = ConvertTo-SecureString $password -AsPlainText -Force
+
           if (-not (Get-LocalUser -Name $username -ErrorAction SilentlyContinue)) {
               New-LocalUser -Name $username -Password $securePass -AccountNeverExpires
           }
+
           Add-LocalGroupMember -Group "Administrators" -Member $username
           Add-LocalGroupMember -Group "Remote Desktop Users" -Member $username
+
           if (Get-LocalUser -Name "RDP" -ErrorAction SilentlyContinue) {
               Remove-LocalUser -Name "RDP"
           }
+
           $regPath = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon\SpecialAccounts\UserList"
           if (-not (Test-Path $regPath)) {
               New-Item -Path $regPath -Force | Out-Null
           }
+
           Get-LocalUser | ForEach-Object {
               New-ItemProperty -Path $regPath -Name $_.Name -Value 0 -PropertyType DWord -Force
           }
           New-ItemProperty -Path $regPath -Name $username -Value 1 -PropertyType DWord -Force
+
           echo "RDP_CREDS=User: $username | Password: $password" >> $env:GITHUB_ENV
 
       - name: Clean Azure/Assure/Unity Shortcuts
@@ -69,15 +81,23 @@ jobs:
               $tsIP = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
               Start-Sleep -Seconds 5; $retries++
           }
-          if (-not $tsIP) { Write-Error "Tailscale IP not assigned. Exiting."; exit 1 }
+          if (-not $tsIP) {
+              Write-Error "Tailscale IP not assigned. Exiting."
+              exit 1
+          }
           echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
 
       - name: Verify RDP Accessibility
         run: |
           Write-Host "Tailscale IP: $env:TAILSCALE_IP"
-          $testResult = Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port 3389
-          if (-not $testResult.TcpTestSucceeded) { Write-Error "TCP 3389 failed"; exit 1 }
-          Write-Host "TCP connectivity successful!"
+          $test = Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port 3389
+          if (-not $test.TcpTestSucceeded) {
+              Write-Error "TCP 3389 failed"
+              exit 1
+          }
+          Write-Host "RDP port is open"
+
+      # ===== new added config steps =====
 
       - name: Install Visual Studio Code
         run: |
@@ -89,7 +109,7 @@ jobs:
 
       - name: Install Git for Windows
         run: |
-          $gitUrl = "https://github.com/git-for-windows/git/releases/download/v2.51.0.windows.2/Git-2.51.0-64-bit.exe"
+          $gitUrl = "https://github.com/git-for-windows/git/releases/download/v2.51.0.windows.2/Git-2.51.0.2-64-bit.exe"
           $installerPath = "$env:TEMP\Git-Installer.exe"
           Invoke-WebRequest -Uri $gitUrl -OutFile $installerPath
           Start-Process -FilePath $installerPath -ArgumentList "/VERYSILENT", "/NORESTART" -Wait
@@ -97,8 +117,10 @@ jobs:
 
       - name: Unpin Microsoft Edge from Taskbar
         run: |
-          $taskbarPath = [System.IO.Path]::Combine($env:APPDATA, 'Microsoft\Internet Explorer\Quick Launch\User Pinned\TaskBar', 'Microsoft Edge.lnk')
-          if (Test-Path $taskbarPath) { Remove-Item $taskbarPath -Force }
+          $taskbarShortcut = [System.IO.Path]::Combine($env:APPDATA, 'Microsoft\Internet Explorer\Quick Launch\User Pinned\TaskBar', 'Microsoft Edge.lnk')
+          if (Test-Path $taskbarShortcut) {
+              Remove-Item $taskbarShortcut -Force
+          }
 
       - name: Pin Firefox to Taskbar
         run: |
@@ -122,17 +144,26 @@ jobs:
 
       - name: Set Firefox as Default Browser
         run: |
-          $firefoxPath = "C:\Program Files\Mozilla Firefox\firefox.exe"
-          if (Test-Path $firefoxPath) {
-              $keyHttp = "HKCU:\Software\Microsoft\Windows\Shell\Associations\UrlAssociations\http\UserChoice"
-              $keyHttps = "HKCU:\Software\Microsoft\Windows\Shell\Associations\UrlAssociations\https\UserChoice"
-              Set-ItemProperty -Path $keyHttp -Name "Progid" -Value "FirefoxURL"
-              Set-ItemProperty -Path $keyHttps -Name "Progid" -Value "FirefoxURL"
-          }
+          $keyHttp = "HKCU:\Software\Microsoft\Windows\Shell\Associations\UrlAssociations\http\UserChoice"
+          $keyHttps = "HKCU:\Software\Microsoft\Windows\Shell\Associations\UrlAssociations\https\UserChoice"
+          Set-ItemProperty -Path $keyHttp -Name "Progid" -Value "FirefoxURL"
+          Set-ItemProperty -Path $keyHttps -Name "Progid" -Value "FirefoxURL"
 
-      - name: Launch Firefox Maximized with GitHub and Discord
+      - name: Launch Firefox Maximized with GitHub & Discord
         run: |
           $firefoxPath = "C:\Program Files\Mozilla Firefox\firefox.exe"
           if (Test-Path $firefoxPath) {
               Start-Process $firefoxPath -ArgumentList "--new-window", "--start-maximized", "https://github.com", "https://discord.com/app"
+          }
+
+      - name: Maintain Connection
+        run: |
+          Write-Host "`n=== RDP ACCESS ==="
+          Write-Host "Address: $env:TAILSCALE_IP"
+          Write-Host "Username: $(${env:RDP_CREDS}.Split('|')[0].Split(':')[1].Trim())"
+          Write-Host "Password: $(${env:RDP_CREDS}.Split('|')[1].Split(':')[1].Trim())"
+          Write-Host "==================`n"
+          while ($true) {
+              Write-Host "[$(Get-Date)] RDP Active - Use Ctrl+C in workflow to terminate"
+              Start-Sleep -Seconds 300
           }
