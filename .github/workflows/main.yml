@@ -25,6 +25,7 @@ jobs:
         run: |
           $username = "${{ secrets.NAME }}"
           $password = "${{ secrets.PASS }}"
+
           secedit /export /cfg $env:TEMP\secpol.cfg
           (Get-Content $env:TEMP\secpol.cfg).Replace("PasswordComplexity = 1", "PasswordComplexity = 0") | Set-Content $env:TEMP\secpol.cfg
           secedit /configure /db secedit.sdb /cfg $env:TEMP\secpol.cfg /areas SECURITYPOLICY
@@ -116,26 +117,26 @@ jobs:
           if (Test-Path $edgeLink) { Remove-Item $edgeLink -Force }
 
           # Create temporary script for pinning apps
-          $script = @"
-\$shell = New-Object -ComObject Shell.Application
+          $script = @'
+          $shell = New-Object -ComObject Shell.Application
 
-# Pin Firefox
-\$folder = \$shell.Namespace('C:\Program Files\Mozilla Firefox')
-\$file = \$folder.ParseName('firefox.exe')
-\$file.InvokeVerb('taskbarpin')
+          # Pin Firefox
+          $folder = $shell.Namespace("C:\Program Files\Mozilla Firefox")
+          $file = $folder.ParseName("firefox.exe")
+          $file.InvokeVerb("taskbarpin")
 
-# Pin VS Code
-\$folder = \$shell.Namespace('C:\Program Files\Microsoft VS Code')
-\$file = \$folder.ParseName('Code.exe')
-\$file.InvokeVerb('taskbarpin')
+          # Pin VS Code
+          $folder = $shell.Namespace("C:\Program Files\Microsoft VS Code")
+          $file = $folder.ParseName("Code.exe")
+          $file.InvokeVerb("taskbarpin")
 
-# Set Firefox default browser
-Set-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\Shell\Associations\UrlAssociations\http\UserChoice' -Name 'Progid' -Value 'FirefoxURL'
-Set-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\Shell\Associations\UrlAssociations\https\UserChoice' -Name 'Progid' -Value 'FirefoxURL'
+          # Set Firefox default browser
+          Set-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\Shell\Associations\UrlAssociations\http\UserChoice" -Name "Progid" -Value "FirefoxURL"
+          Set-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\Shell\Associations\UrlAssociations\https\UserChoice" -Name "Progid" -Value "FirefoxURL"
 
-# Launch Firefox maximized with GitHub + Discord
-Start-Process 'C:\Program Files\Mozilla Firefox\firefox.exe' -ArgumentList '--new-window','--start-maximized','https://github.com','https://discord.com/app'
-"@
+          # Launch Firefox maximized with GitHub + Discord
+          Start-Process "C:\Program Files\Mozilla Firefox\firefox.exe" -ArgumentList "--new-window","--start-maximized","https://github.com","https://discord.com/app"
+          '@
 
           $tempPath = "$env:TEMP\pinapps.ps1"
           $script | Out-File -FilePath $tempPath -Encoding UTF8
