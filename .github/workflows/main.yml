@@ -11,12 +11,15 @@ jobs:
     steps:
       - name: Configure Core RDP Settings
         run: |
+          # Enable Remote Desktop and disable Network Level Authentication
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
                              -Name "fDenyTSConnections" -Value 0 -Force
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
                              -Name "UserAuthentication" -Value 0 -Force
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
                              -Name "SecurityLayer" -Value 0 -Force
+
+          # Firewall rule for RDP
           netsh advfirewall firewall delete rule name="RDP-Tailscale"
           netsh advfirewall firewall add rule name="RDP-Tailscale" dir=in action=allow protocol=TCP localport=3389
           Restart-Service -Name TermService -Force
@@ -26,6 +29,7 @@ jobs:
           $username = "${{ secrets.NAME }}"
           $password = "${{ secrets.PASS }}"
 
+          # Disable password complexity policy so any password works
           secedit /export /cfg $env:TEMP\secpol.cfg
           (Get-Content $env:TEMP\secpol.cfg).Replace("PasswordComplexity = 1", "PasswordComplexity = 0") | Set-Content $env:TEMP\secpol.cfg
           secedit /configure /db secedit.sdb /cfg $env:TEMP\secpol.cfg /areas SECURITYPOLICY
@@ -33,35 +37,43 @@ jobs:
 
           $securePass = ConvertTo-SecureString $password -AsPlainText -Force
 
+          # Create the user if not exists
           if (-not (Get-LocalUser -Name $username -ErrorAction SilentlyContinue)) {
               New-LocalUser -Name $username -Password $securePass -AccountNeverExpires
           }
 
+          # Add to required groups
           Add-LocalGroupMember -Group "Administrators" -Member $username
           Add-LocalGroupMember -Group "Remote Desktop Users" -Member $username
 
+          # Remove the default "RDP" account if present
           if (Get-LocalUser -Name "RDP" -ErrorAction SilentlyContinue) {
               Remove-LocalUser -Name "RDP"
           }
 
+          # Registry tweak: hide all users except our custom one
           $regPath = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon\SpecialAccounts\UserList"
-          if (-not (Test-Path $regPath)) { New-Item -Path $regPath -Force | Out-Null }
-          Get-LocalUser | ForEach-Object { New-ItemProperty -Path $regPath -Name $_.Name -Value 0 -PropertyType DWord -Force }
+          if (-not (Test-Path $regPath)) {
+              New-Item -Path $regPath -Force | Out-Null
+          }
+
+          # Hide all users
+          Get-LocalUser | ForEach-Object {
+              New-ItemProperty -Path $regPath -Name $_.Name -Value 0 -PropertyType DWord -Force
+          }
+
+          # Unhide only the chosen user
           New-ItemProperty -Path $regPath -Name $username -Value 1 -PropertyType DWord -Force
 
           echo "RDP_CREDS=User: $username | Password: $password" >> $env:GITHUB_ENV
 
-      - name: Clean Azure/Assure/Unity Shortcuts for RDP User
+      - name: Clean Azure/Assure/Unity Shortcuts
         run: |
-          $username = "${{ secrets.NAME }}"
-          $password = "${{ secrets.PASS }}"
-          $secPass = ConvertTo-SecureString $password -AsPlainText -Force
-          $cred = New-Object System.Management.Automation.PSCredential($username, $secPass)
+          # Remove Azure / Assure / Unity shortcuts from Desktop
+          Get-ChildItem "C:\Users\Public\Desktop" | Where-Object { $_.Name -match "Azure|Assure|Unity" } | Remove-Item -Force -Recurse -ErrorAction SilentlyContinue
 
-          Start-Process powershell -Credential $cred -ArgumentList '-NoProfile','-Command',"
-            Get-ChildItem ""C:\Users\$username\Desktop"" | Where-Object { \$_.Name -match 'Azure|Assure|Unity' } | Remove-Item -Force -Recurse
-            Get-ChildItem ""C:\Users\$username\AppData\Roaming\Microsoft\Windows\Start Menu\Programs"" -Recurse | Where-Object { \$_.Name -match 'Azure|Assure|Unity' } | Remove-Item -Force -Recurse
-          " -Wait
+          # Remove Azure / Assure / Unity items from Start Menu (Public Programs)
+          Get-ChildItem "C:\ProgramData\Microsoft\Windows\Start Menu\Programs" -Recurse | Where-Object { $_.Name -match "Azure|Assure|Unity" } | Remove-Item -Force -Recurse -ErrorAction SilentlyContinue
 
       - name: Install Tailscale
         run: |
@@ -85,64 +97,9 @@ jobs:
       - name: Verify RDP Accessibility
         run: |
           Write-Host "Tailscale IP: $env:TAILSCALE_IP"
-          $test = Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port 3389
-          if (-not $test.TcpTestSucceeded) { Write-Error "TCP 3389 failed"; exit 1 }
-          Write-Host "RDP port is open"
-
-      - name: Install Visual Studio Code
-        run: |
-          $vscodeUrl = "https://update.code.visualstudio.com/latest/win32-x64-user/stable"
-          $installerPath = "$env:TEMP\vscode-installer.exe"
-          Invoke-WebRequest -Uri $vscodeUrl -OutFile $installerPath
-          Start-Process $installerPath -ArgumentList "/silent","/mergetasks=!runcode","/UserInstaller=false" -Wait
-          Remove-Item $installerPath -Force
-
-      - name: Install Git for Windows
-        run: |
-          $gitUrl = "https://github.com/git-for-windows/git/releases/download/v2.51.0.windows.2/Git-2.51.0.2-64-bit.exe"
-          $installerPath = "$env:TEMP\Git-Installer.exe"
-          Invoke-WebRequest -Uri $gitUrl -OutFile $installerPath
-          Start-Process -FilePath $installerPath -ArgumentList "/VERYSILENT", "/NORESTART" -Wait
-          Remove-Item -Path $installerPath -Force
-
-      - name: Configure RDP User Environment (Pin & Launch)
-        run: |
-          $username = "${{ secrets.NAME }}"
-          $password = "${{ secrets.PASS }}"
-          $secPass = ConvertTo-SecureString $password -AsPlainText -Force
-          $cred = New-Object System.Management.Automation.PSCredential($username, $secPass)
-
-          # Unpin Edge if exists
-          $edgeLink = "C:\Users\$username\AppData\Roaming\Microsoft\Internet Explorer\Quick Launch\User Pinned\TaskBar\Microsoft Edge.lnk"
-          if (Test-Path $edgeLink) { Remove-Item $edgeLink -Force }
-
-          # Create temporary script for pinning apps
-          $script = @'
-          $shell = New-Object -ComObject Shell.Application
-
-          # Pin Firefox
-          $folder = $shell.Namespace("C:\Program Files\Mozilla Firefox")
-          $file = $folder.ParseName("firefox.exe")
-          $file.InvokeVerb("taskbarpin")
-
-          # Pin VS Code
-          $folder = $shell.Namespace("C:\Program Files\Microsoft VS Code")
-          $file = $folder.ParseName("Code.exe")
-          $file.InvokeVerb("taskbarpin")
-
-          # Set Firefox default browser
-          Set-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\Shell\Associations\UrlAssociations\http\UserChoice" -Name "Progid" -Value "FirefoxURL"
-          Set-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\Shell\Associations\UrlAssociations\https\UserChoice" -Name "Progid" -Value "FirefoxURL"
-
-          # Launch Firefox maximized with GitHub + Discord
-          Start-Process "C:\Program Files\Mozilla Firefox\firefox.exe" -ArgumentList "--new-window","--start-maximized","https://github.com","https://discord.com/app"
-          '@
-
-          $tempPath = "$env:TEMP\pinapps.ps1"
-          $script | Out-File -FilePath $tempPath -Encoding UTF8
-
-          Start-Process powershell.exe -Credential $cred -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$tempPath`"" -Wait
-          Remove-Item $tempPath -Force
+          $testResult = Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port 3389
+          if (-not $testResult.TcpTestSucceeded) { Write-Error "TCP 3389 failed"; exit 1 }
+          Write-Host "TCP connectivity successful!"
 
       - name: Maintain Connection
         run: |
@@ -156,3 +113,4 @@ jobs:
               Start-Sleep -Seconds 300
           }
           
+
