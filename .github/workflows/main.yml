@@ -59,11 +59,15 @@ jobs:
 
       - name: Clean Azure/Assure/Unity Shortcuts for RDP User
         run: |
-          $secPass = ConvertTo-SecureString "${{ secrets.PASS }}" -AsPlainText -Force
-          $cred = New-Object System.Management.Automation.PSCredential("${{ secrets.NAME }}", $secPass)
+          $username = "${{ secrets.NAME }}"
+          $password = "${{ secrets.PASS }}"
+          $secPass = ConvertTo-SecureString $password -AsPlainText -Force
+          $cred = New-Object System.Management.Automation.PSCredential($username, $secPass)
 
-          Start-Process powershell -ArgumentList "-Command `"Get-ChildItem `"C:\Users\$($env:USERNAME)\Desktop`" | Where-Object { $_.Name -match 'Azure|Assure|Unity' } | Remove-Item -Force -Recurse`"" -Credential $cred -Wait
-          Start-Process powershell -ArgumentList "-Command `"Get-ChildItem `"C:\Users\$($env:USERNAME)\AppData\Roaming\Microsoft\Windows\Start Menu\Programs`" -Recurse | Where-Object { $_.Name -match 'Azure|Assure|Unity' } | Remove-Item -Force -Recurse`"" -Credential $cred -Wait
+          Start-Process powershell -Credential $cred -ArgumentList '-NoProfile','-Command',"
+            Get-ChildItem ""C:\Users\$username\Desktop"" | Where-Object { \$_.Name -match 'Azure|Assure|Unity' } | Remove-Item -Force -Recurse
+            Get-ChildItem ""C:\Users\$username\AppData\Roaming\Microsoft\Windows\Start Menu\Programs"" -Recurse | Where-Object { \$_.Name -match 'Azure|Assure|Unity' } | Remove-Item -Force -Recurse
+          " -Wait
 
       - name: Install Tailscale
         run: |
@@ -121,22 +125,29 @@ jobs:
           if (Test-Path $edgeLink) { Remove-Item $edgeLink -Force }
 
           # Pin Firefox
-          $firefoxPath = "C:\Program Files\Mozilla Firefox\firefox.exe"
-          if (Test-Path $firefoxPath) {
-              Start-Process powershell -ArgumentList "-Command `"& { \$shell = New-Object -ComObject Shell.Application; \$folder = \$shell.Namespace('C:\Program Files\Mozilla Firefox'); \$file = \$folder.ParseName('firefox.exe'); \$file.InvokeVerb('taskbarpin') }`"" -Credential $cred -Wait
-          }
+          Start-Process powershell -Credential $cred -ArgumentList '-NoProfile','-Command',"
+            \$shell = New-Object -ComObject Shell.Application;
+            \$folder = \$shell.Namespace('C:\Program Files\Mozilla Firefox');
+            \$file = \$folder.ParseName('firefox.exe');
+            \$file.InvokeVerb('taskbarpin');
+          " -Wait
 
           # Pin VS Code
-          $vscodePath = "C:\Program Files\Microsoft VS Code\Code.exe"
-          if (Test-Path $vscodePath) {
-              Start-Process powershell -ArgumentList "-Command `"& { \$shell = New-Object -ComObject Shell.Application; \$folder = \$shell.Namespace('C:\Program Files\Microsoft VS Code'); \$file = \$folder.ParseName('Code.exe'); \$file.InvokeVerb('taskbarpin') }`"" -Credential $cred -Wait
-          }
+          Start-Process powershell -Credential $cred -ArgumentList '-NoProfile','-Command',"
+            \$shell = New-Object -ComObject Shell.Application;
+            \$folder = \$shell.Namespace('C:\Program Files\Microsoft VS Code');
+            \$file = \$folder.ParseName('Code.exe');
+            \$file.InvokeVerb('taskbarpin');
+          " -Wait
 
           # Set Firefox as default browser
-          Start-Process powershell -ArgumentList "-Command `"Set-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\Shell\Associations\UrlAssociations\http\UserChoice' -Name 'Progid' -Value 'FirefoxURL'; Set-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\Shell\Associations\UrlAssociations\https\UserChoice' -Name 'Progid' -Value 'FirefoxURL'`"" -Credential $cred -Wait
+          Start-Process powershell -Credential $cred -ArgumentList '-NoProfile','-Command',"
+            Set-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\Shell\Associations\UrlAssociations\http\UserChoice' -Name 'Progid' -Value 'FirefoxURL';
+            Set-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\Shell\Associations\UrlAssociations\https\UserChoice' -Name 'Progid' -Value 'FirefoxURL';
+          " -Wait
 
           # Launch Firefox maximized with GitHub + Discord
-          Start-Process "C:\Program Files\Mozilla Firefox\firefox.exe" -ArgumentList "--new-window", "--start-maximized", "https://github.com","https://discord.com/app" -Credential $cred
+          Start-Process "C:\Program Files\Mozilla Firefox\firefox.exe" -ArgumentList "--new-window","--start-maximized","https://github.com","https://discord.com/app" -Credential $cred
 
       - name: Maintain Connection
         run: |
