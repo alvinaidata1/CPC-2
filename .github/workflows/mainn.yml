@@ -20,7 +20,6 @@ jobs:
           Set-ItemProperty 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
             -Name "SecurityLayer" -Value 0 -Force
 
-          netsh advfirewall firewall delete rule name="RDP-Tailscale"
           netsh advfirewall firewall add rule name="RDP-Bore" dir=in action=allow protocol=TCP localport=3389
           Restart-Service TermService -Force
 
@@ -30,30 +29,31 @@ jobs:
           $password = "${{ secrets.PASS }}"
 
           secedit /export /cfg $env:TEMP\secpol.cfg
-          (Get-Content $env:TEMP\secpol.cfg).Replace("PasswordComplexity = 1", "PasswordComplexity = 0") | Set-Content $env:TEMP\secpol.cfg
+          (Get-Content $env:TEMP\secpol.cfg).Replace("PasswordComplexity = 1", "PasswordComplexity = 0") |
+            Set-Content $env:TEMP\secpol.cfg
           secedit /configure /db secedit.sdb /cfg $env:TEMP\secpol.cfg /areas SECURITYPOLICY
           gpupdate /force
 
           $securePass = ConvertTo-SecureString $password -AsPlainText -Force
 
           if (-not (Get-LocalUser -Name $username -ErrorAction SilentlyContinue)) {
-              New-LocalUser -Name $username -Password $securePass -AccountNeverExpires
+            New-LocalUser -Name $username -Password $securePass -AccountNeverExpires
           }
 
           Add-LocalGroupMember -Group "Administrators" -Member $username
           Add-LocalGroupMember -Group "Remote Desktop Users" -Member $username
 
           if (Get-LocalUser -Name "RDP" -ErrorAction SilentlyContinue) {
-              Remove-LocalUser -Name "RDP"
+            Remove-LocalUser -Name "RDP"
           }
 
           $regPath = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon\SpecialAccounts\UserList"
           if (-not (Test-Path $regPath)) {
-              New-Item -Path $regPath -Force | Out-Null
+            New-Item -Path $regPath -Force | Out-Null
           }
 
           Get-LocalUser | ForEach-Object {
-              New-ItemProperty -Path $regPath -Name $_.Name -Value 0 -PropertyType DWord -Force
+            New-ItemProperty -Path $regPath -Name $_.Name -Value 0 -PropertyType DWord -Force
           }
 
           New-ItemProperty -Path $regPath -Name $username -Value 1 -PropertyType DWord -Force
@@ -61,7 +61,7 @@ jobs:
           echo "RDP_USER=$username" >> $env:GITHUB_ENV
           echo "RDP_PASS=$password" >> $env:GITHUB_ENV
 
-      - name: Clean Azure/Assure/Unity Shortcuts
+      - name: Clean Azure / Assure / Unity Shortcuts
         run: |
           Get-ChildItem "C:\Users\Public\Desktop" |
             Where-Object { $_.Name -match "Azure|Assure|Unity" } |
@@ -79,21 +79,25 @@ jobs:
           Expand-Archive bore.zip -DestinationPath C:\bore
           echo "C:\bore" >> $env:GITHUB_PATH
 
+      - name: Print COPY-PASTE RDP Command
+        run: |
+          Write-Host ""
+          Write-Host "========= COPY & PASTE (WINDOWS) ========="
+          Write-Host "mstsc /v:${{ secrets.BORE_SERVER }}:${{ secrets.BORE_PUBLIC_PORT }}"
+          Write-Host ""
+          Write-Host "Username: $env:RDP_USER"
+          Write-Host "Password: $env:RDP_PASS"
+          Write-Host "=========================================="
+
       - name: Start Bore TCP Tunnel
         run: |
-          bore client `
-            --server ${{ secrets.BORE_SERVER }}:${{ secrets.BORE_PORT }} `
-            --local-port 3389 `
-            --to-port ${{ secrets.BORE_PUBLIC_PORT }}
+          bore local 3389 `
+            --to ${{ secrets.BORE_SERVER }}:${{ secrets.BORE_PORT }} `
+            --port ${{ secrets.BORE_PUBLIC_PORT }}
 
       - name: Maintain Connection
         run: |
-          Write-Host "`n=== RDP ACCESS ==="
-          Write-Host "Address : ${{ secrets.BORE_SERVER }}:${{ secrets.BORE_PUBLIC_PORT }}"
-          Write-Host "Username: $env:RDP_USER"
-          Write-Host "Password: $env:RDP_PASS"
-          Write-Host "==================`n"
           while ($true) {
-              Write-Host "[$(Get-Date)] RDP Active (Bore TCP)"
-              Start-Sleep -Seconds 300
+            Write-Host "[$(Get-Date)] RDP Active via Bore TCP"
+            Start-Sleep -Seconds 300
           }
