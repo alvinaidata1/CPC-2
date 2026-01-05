@@ -9,58 +9,50 @@ jobs:
     timeout-minutes: 3600
 
     steps:
-      - name: Configure Core RDP Settings
+      - name: Force-enable RDP (max compatibility)
         run: |
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
-            -Name "fDenyTSConnections" -Value 0 -Force
+          reg add "HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server" /v fDenyTSConnections /t REG_DWORD /d 0 /f
+          reg add "HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server" /v fSingleSessionPerUser /t REG_DWORD /d 0 /f
 
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
-            -Name "UserAuthentication" -Value 0 -Force
+          reg add "HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" /v fEnableWinStation /t REG_DWORD /d 1 /f
+          reg add "HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" /v UserAuthentication /t REG_DWORD /d 0 /f
+          reg add "HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" /v SecurityLayer /t REG_DWORD /d 0 /f
+          reg add "HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" /v AuthenticationLevel /t REG_DWORD /d 0 /f
+          reg add "HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" /v MinEncryptionLevel /t REG_DWORD /d 1 /f
+          reg add "HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" /v PortNumber /t REG_DWORD /d 3389 /f
 
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
-            -Name "SecurityLayer" -Value 0 -Force
+          reg add "HKLM\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services" /v fClientDisableUDP /t REG_DWORD /d 1 /f
 
           netsh advfirewall firewall add rule name="RDP-ngrok" dir=in action=allow protocol=TCP localport=3389
-          Restart-Service -Name TermService -Force
 
-      - name: Create RDP User from Secrets
+          Restart-Service TermService -Force
+
+      - name: Create RDP user
         run: |
-          $username = "${{ secrets.NAME }}"
-          $password = "${{ secrets.PASS }}"
+          $u = "${{ secrets.NAME }}"
+          $p = "${{ secrets.PASS }}"
 
           secedit /export /cfg $env:TEMP\secpol.cfg
           (Get-Content $env:TEMP\secpol.cfg).Replace("PasswordComplexity = 1","PasswordComplexity = 0") | Set-Content $env:TEMP\secpol.cfg
           secedit /configure /db secedit.sdb /cfg $env:TEMP\secpol.cfg /areas SECURITYPOLICY
           gpupdate /force
 
-          $securePass = ConvertTo-SecureString $password -AsPlainText -Force
+          $sp = ConvertTo-SecureString $p -AsPlainText -Force
 
-          if (-not (Get-LocalUser -Name $username -ErrorAction SilentlyContinue)) {
-            New-LocalUser -Name $username -Password $securePass -AccountNeverExpires
+          if (-not (Get-LocalUser -Name $u -ErrorAction SilentlyContinue)) {
+            New-LocalUser -Name $u -Password $sp -AccountNeverExpires
           }
 
-          Add-LocalGroupMember -Group "Administrators" -Member $username
-          Add-LocalGroupMember -Group "Remote Desktop Users" -Member $username
+          Add-LocalGroupMember Administrators $u
+          Add-LocalGroupMember "Remote Desktop Users" $u
 
-          $regPath = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon\SpecialAccounts\UserList"
-          New-Item -Path $regPath -Force | Out-Null
-          Get-LocalUser | ForEach-Object {
-            New-ItemProperty -Path $regPath -Name $_.Name -Value 0 -PropertyType DWord -Force
-          }
-          New-ItemProperty -Path $regPath -Name $username -Value 1 -PropertyType DWord -Force
-
-          echo "RDP_USER=$username" >> $env:GITHUB_ENV
-          echo "RDP_PASS=$password" >> $env:GITHUB_ENV
-
-      - name: Clean Azure / Assure / Unity Shortcuts
-        run: |
-          Get-ChildItem "C:\Users\Public\Desktop" | Where-Object { $_.Name -match "Azure|Assure|Unity" } | Remove-Item -Force -Recurse -ErrorAction SilentlyContinue
-          Get-ChildItem "C:\ProgramData\Microsoft\Windows\Start Menu\Programs" -Recurse | Where-Object { $_.Name -match "Azure|Assure|Unity" } | Remove-Item -Force -Recurse -ErrorAction SilentlyContinue
+          echo "RDP_USER=$u" >> $env:GITHUB_ENV
+          echo "RDP_PASS=$p" >> $env:GITHUB_ENV
 
       - name: Download ngrok
         run: |
           Invoke-WebRequest https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-windows-amd64.zip -OutFile ngrok.zip
-          Expand-Archive ngrok.zip -DestinationPath ngrok
+          Expand-Archive ngrok.zip ngrok
 
       - name: Configure ngrok
         env:
@@ -68,37 +60,30 @@ jobs:
         run: |
           .\ngrok\ngrok.exe config add-authtoken $env:NGROK_AUTH_TOKEN
 
-      - name: Start ngrok TCP tunnel (log to file)
+      - name: Start ngrok TCP tunnel
         run: |
           Start-Process -NoNewWindow `
             -FilePath ".\ngrok\ngrok.exe" `
             -ArgumentList "tcp 3389 --log=stdout --log-format=json" `
             -RedirectStandardOutput ngrok.log
+          Start-Sleep -Seconds 20
 
-          Start-Sleep -Seconds 15
-
-      - name: Extract ngrok RDP address
+      - name: Extract ngrok address
         run: |
-          $line = Get-Content ngrok.log | Select-String "started tunnel" | Select-Object -Last 1
-          if (-not $line) {
-            Write-Error "ngrok tunnel not found in logs"
-            exit 1
-          }
-
-          $addr = ($line -split '"url":"')[1].Split('"')[0]
-          $addr = $addr.Replace("tcp://","")
-
+          $line = Get-Content ngrok.log | Select-String '"url":"tcp://'
+          $addr = ($line -split '"url":"')[1].Split('"')[0].Replace("tcp://","")
           echo "NGROK_ADDR=$addr" >> $env:GITHUB_ENV
 
-      - name: Maintain Connection
+      - name: Keep alive
         run: |
-          Write-Host "`n====== RDP READY ======"
+          Write-Host ""
+          Write-Host "====== RDP READY ======"
           Write-Host "Address  : $env:NGROK_ADDR"
-          Write-Host "Username : $env:RDP_USER"
+          Write-Host "Username : .\$env:RDP_USER"
           Write-Host "Password : $env:RDP_PASS"
-          Write-Host "=======================`n"
+          Write-Host "======================="
+          Write-Host ""
 
           while ($true) {
-            Write-Host "[$(Get-Date)] RDP active via ngrok"
-            Start-Sleep -Seconds 300
+            Start-Sleep 300
           }
