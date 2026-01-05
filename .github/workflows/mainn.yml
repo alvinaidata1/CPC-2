@@ -12,64 +12,29 @@ jobs:
       - name: Configure Core RDP Settings
         run: |
           Set-ItemProperty 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
-            -Name "fDenyTSConnections" -Value 0 -Force
+            -Name fDenyTSConnections -Value 0 -Force
 
           Set-ItemProperty 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
-            -Name "UserAuthentication" -Value 0 -Force
-
-          Set-ItemProperty 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
-            -Name "SecurityLayer" -Value 0 -Force
+            -Name UserAuthentication -Value 0 -Force
 
           netsh advfirewall firewall add rule name="RDP-Bore" dir=in action=allow protocol=TCP localport=3389
           Restart-Service TermService -Force
 
-      - name: Create RDP User from Secrets
+      - name: Create RDP User
         run: |
-          $username = "${{ secrets.NAME }}"
-          $password = "${{ secrets.PASS }}"
+          $u = "${{ secrets.NAME }}"
+          $p = "${{ secrets.PASS }}"
+          $sp = ConvertTo-SecureString $p -AsPlainText -Force
 
-          secedit /export /cfg $env:TEMP\secpol.cfg
-          (Get-Content $env:TEMP\secpol.cfg).Replace("PasswordComplexity = 1", "PasswordComplexity = 0") |
-            Set-Content $env:TEMP\secpol.cfg
-          secedit /configure /db secedit.sdb /cfg $env:TEMP\secpol.cfg /areas SECURITYPOLICY
-          gpupdate /force
-
-          $securePass = ConvertTo-SecureString $password -AsPlainText -Force
-
-          if (-not (Get-LocalUser -Name $username -ErrorAction SilentlyContinue)) {
-            New-LocalUser -Name $username -Password $securePass -AccountNeverExpires
+          if (-not (Get-LocalUser -Name $u -ErrorAction SilentlyContinue)) {
+            New-LocalUser $u -Password $sp -AccountNeverExpires
           }
 
-          Add-LocalGroupMember -Group "Administrators" -Member $username
-          Add-LocalGroupMember -Group "Remote Desktop Users" -Member $username
+          Add-LocalGroupMember Administrators $u
+          Add-LocalGroupMember "Remote Desktop Users" $u
 
-          if (Get-LocalUser -Name "RDP" -ErrorAction SilentlyContinue) {
-            Remove-LocalUser -Name "RDP"
-          }
-
-          $regPath = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon\SpecialAccounts\UserList"
-          if (-not (Test-Path $regPath)) {
-            New-Item -Path $regPath -Force | Out-Null
-          }
-
-          Get-LocalUser | ForEach-Object {
-            New-ItemProperty -Path $regPath -Name $_.Name -Value 0 -PropertyType DWord -Force
-          }
-
-          New-ItemProperty -Path $regPath -Name $username -Value 1 -PropertyType DWord -Force
-
-          echo "RDP_USER=$username" >> $env:GITHUB_ENV
-          echo "RDP_PASS=$password" >> $env:GITHUB_ENV
-
-      - name: Clean Azure / Assure / Unity Shortcuts
-        run: |
-          Get-ChildItem "C:\Users\Public\Desktop" |
-            Where-Object { $_.Name -match "Azure|Assure|Unity" } |
-            Remove-Item -Force -Recurse -ErrorAction SilentlyContinue
-
-          Get-ChildItem "C:\ProgramData\Microsoft\Windows\Start Menu\Programs" -Recurse |
-            Where-Object { $_.Name -match "Azure|Assure|Unity" } |
-            Remove-Item -Force -Recurse -ErrorAction SilentlyContinue
+          echo "RDP_USER=$u" >> $env:GITHUB_ENV
+          echo "RDP_PASS=$p" >> $env:GITHUB_ENV
 
       - name: Install Bore
         run: |
@@ -79,15 +44,18 @@ jobs:
           Expand-Archive bore.zip -DestinationPath C:\bore
           echo "C:\bore" >> $env:GITHUB_PATH
 
-      - name: Print COPY-PASTE RDP Command
+      - name: PRINT CONNECTION INFO (COPY THIS)
         run: |
           Write-Host ""
-          Write-Host "========= COPY & PASTE (WINDOWS) ========="
+          Write-Host "================ CONNECT ================="
+          Write-Host "BORE_PUB: ${{ secrets.BORE_SERVER }}:${{ secrets.BORE_PUBLIC_PORT }}"
+          Write-Host ""
           Write-Host "mstsc /v:${{ secrets.BORE_SERVER }}:${{ secrets.BORE_PUBLIC_PORT }}"
           Write-Host ""
           Write-Host "Username: $env:RDP_USER"
           Write-Host "Password: $env:RDP_PASS"
           Write-Host "=========================================="
+          Write-Host ""
 
       - name: Start Bore TCP Tunnel
         run: |
@@ -98,6 +66,6 @@ jobs:
       - name: Maintain Connection
         run: |
           while ($true) {
-            Write-Host "[$(Get-Date)] RDP Active via Bore TCP"
-            Start-Sleep -Seconds 300
+            Write-Host "[$(Get-Date)] RDP ACTIVE (BORE)"
+            Start-Sleep 300
           }
