@@ -1,5 +1,3 @@
-t failures
-          }
 name: WINDOWS RDP with Bore TCP
 
 on:
@@ -8,140 +6,72 @@ on:
 jobs:
   secure-rdp:
     runs-on: windows-latest
+
     steps:
-    - name: Enhanced RDP Configuration
-      run: |
-        Write-Output "Configuring RDP with enhanced settings..."
-        
-        Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
-        Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0 -Force
-        Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "SecurityLayer" -Value 0 -Force
-        Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "fAllowSecProtocolNegotiation" -Value 0 -Force
-        
-        Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
-        Remove-NetFirewallRule -DisplayName "RDP-Custom" -ErrorAction SilentlyContinue
-        New-NetFirewallRule -DisplayName "RDP-Custom" -Direction Inbound -Protocol TCP -LocalPort 3389 -Action Allow
-        
-        Set-Service -Name "TermService" -StartupType Automatic
-        Start-Service -Name "TermService"
-        Set-Service -Name "UmRdpService" -StartupType Automatic -ErrorAction SilentlyContinue
-        Start-Service -Name "UmRdpService" -ErrorAction SilentlyContinue
-        
-        Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "TSEnabled" -Value 1 -Force
-        Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "TSUserEnabled" -Value 1 -Force
-        
-        Write-Output "✅ RDP configuration completed"
+      - name: Enhanced RDP Configuration
+        run: |
+          Write-Output "Configuring RDP with enhanced settings..."
 
-    - name: Allow Simple Passwords
-      run: |
-        secedit /export /cfg secpol.cfg
-        (Get-Content secpol.cfg).Replace("PasswordComplexity = 1", "PasswordComplexity = 0") | Set-Content secpol.cfg
-        secedit /configure /db secpol.sdb /cfg secpol.cfg /areas SECURITYPOLICY
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "SecurityLayer" -Value 0 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "fAllowSecProtocolNegotiation" -Value 0 -Force
 
-    - name: Create RDP User with Enhanced Permissions
-      run: |
-        $username = "${{ secrets.NAME }}"
-        $password = "${{ secrets.PASS }}"
-        $securePassword = ConvertTo-SecureString $password -AsPlainText -Force
-        
-        if (Get-LocalUser -Name $username -ErrorAction SilentlyContinue) {
+          Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
+          Remove-NetFirewallRule -DisplayName "RDP-Custom" -ErrorAction SilentlyContinue
+          New-NetFirewallRule -DisplayName "RDP-Custom" -Direction Inbound -Protocol TCP -LocalPort 3389 -Action Allow
+
+          Set-Service -Name "TermService" -StartupType Automatic
+          Start-Service -Name "TermService"
+
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "TSEnabled" -Value 1 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "TSUserEnabled" -Value 1 -Force
+
+          Write-Output "✅ RDP configuration completed"
+
+      - name: Allow Simple Passwords
+        run: |
+          secedit /export /cfg secpol.cfg
+          (Get-Content secpol.cfg).Replace("PasswordComplexity = 1", "PasswordComplexity = 0") | Set-Content secpol.cfg
+          secedit /configure /db secpol.sdb /cfg secpol.cfg /areas SECURITYPOLICY
+
+      - name: Create RDP User
+        run: |
+          $username = "${{ secrets.NAME }}"
+          $password = "${{ secrets.PASS }}"
+          $securePassword = ConvertTo-SecureString $password -AsPlainText -Force
+
+          if (Get-LocalUser -Name $username -ErrorAction SilentlyContinue) {
             Remove-LocalUser -Name $username -Force
-        }
-        
-        New-LocalUser -Name $username -Password $securePassword -FullName $username -Description "RDP User" -PasswordNeverExpires
-        Add-LocalGroupMember -Group "Administrators" -Member $username
-        Add-LocalGroupMember -Group "Remote Desktop Users" -Member $username
-        
-        Write-Output "✅ Created user: $username"
-        Write-Output "✅ Password: $password"
+          }
 
-    - name: Hide Extra Users from Login Screen
-      run: |
-        $usersToHide = @("runneradmin","installer","DefaultAccount","WDAGUtilityAccount")
-        $regPath = "HKLM:\Software\Microsoft\Windows NT\CurrentVersion\Winlogon\SpecialAccounts\UserList"
-        if (-not (Test-Path $regPath)) { New-Item -Path $regPath -Force | Out-Null }
-        foreach ($user in $usersToHide) {
-          New-ItemProperty -Path $regPath -Name $user -Value 0 -PropertyType DWord -Force
-        }
+          New-LocalUser -Name $username -Password $securePassword -PasswordNeverExpires
+          Add-LocalGroupMember -Group "Administrators" -Member $username
+          Add-LocalGroupMember -Group "Remote Desktop Users" -Member $username
 
-    - name: Remove Unwanted Shortcuts
-      run: |
-        $shortcuts = @(
-          "C:\Users\Public\Desktop\Epic Games Launcher.lnk",
-          "C:\ProgramData\Microsoft\Windows\Start Menu\Programs\Epic Games Launcher.lnk",
-          "C:\Users\Public\Desktop\Unity Hub.lnk",
-          "C:\ProgramData\Microsoft\Windows\Start Menu\Programs\Unity Hub.lnk",
-          "C:\Users\Public\Desktop\R 4.4.2.lnk",
-          "C:\ProgramData\Microsoft\Windows\Start Menu\Programs\R 4.4.2.lnk"
-        )
-        foreach ($shortcut in $shortcuts) {
-          Remove-Item $shortcut -ErrorAction SilentlyContinue
-        }
+          Write-Output "✅ User created"
 
-        Get-ChildItem "C:\ProgramData\Microsoft\Windows\Start Menu\Programs" -Recurse -Filter "*Azure*.lnk" | Remove-Item -ErrorAction SilentlyContinue
+      - name: Download and Start Bore TCP Tunnel
+        shell: pwsh
+        run: |
+          Invoke-WebRequest https://github.com/ekzhang/bore/releases/download/v0.6.0/bore-v0.6.0-x86_64-pc-windows-msvc.zip -OutFile bore.zip
+          Expand-Archive bore.zip -DestinationPath . -Force
 
-    - name: Final RDP Service Preparation
-      run: |
-        Write-Output "Final RDP service preparation..."
-        
-        Stop-Service -Name "TermService" -Force
-        Start-Sleep -Seconds 3
-        Start-Service -Name "TermService"
-        Start-Sleep -Seconds 5
-        
-        $rdpService = Get-Service -Name "TermService"
-        Write-Output "RDP Service Status: $($rdpService.Status)"
-        
-        try {
-            $tcpClient = New-Object System.Net.Sockets.TcpClient
-            $tcpClient.Connect("127.0.0.1", 3389)
-            $tcpClient.Close()
-            Write-Output "✅ RDP port 3389 is accessible locally"
-        } catch {
-            Write-Output "❌ RDP port 3389 test failed: $_"
-            Restart-Service -Name "TermService" -Force
-        }
-
-    - name: Download and Start Bore TCP Tunnel
-      shell: pwsh
-      run: |
-        Write-Output "Setting up Bore TCP tunnel..."
-        
-        $boreUrl = "https://github.com/ekzhang/bore/releases/download/v0.6.0/bore-v0.6.0-x86_64-pc-windows-msvc.zip"
-        Invoke-WebRequest -Uri $boreUrl -OutFile "bore.zip"
-        Expand-Archive -Path "bore.zip" -DestinationPath "." -Force
-        
-        Write-Output "Starting Bore tunnel on port 3389..."
-        Start-Process -FilePath ".\bore.exe" -ArgumentList "local", "3389", "--to", "bore.pub" -NoNewWindow
-        
-        Start-Sleep -Seconds 15
-
-    - name: Keep Services Running with Tunnel Keepalive
-      run: |
-        Write-Output "Maintaining connection with active keepalive for 6 hours..."
-        
-        for ($i = 0; $i -lt 2160; $i++) {
+          Start-Process .\bore.exe -ArgumentList "local","3389","--to","bore.pub" -NoNewWindow
           Start-Sleep -Seconds 10
-          
-          $rdpService = Get-Service -Name "TermService" -ErrorAction SilentlyContinue
-          if ($rdpService.Status -ne "Running") {
-            Start-Service -Name "TermService"
-            Write-Output "⚠️ Restarted RDP service"
-          }
-          
-          $boreProcess = Get-Process -Name "bore" -ErrorAction SilentlyContinue
-          if (-not $boreProcess) {
-            Start-Process -FilePath ".\bore.exe" -ArgumentList "local", "3389", "--to", "bore.pub" -NoNewWindow
-            Write-Output "⚠️ Restarted Bore tunnel"
+
+      - name: Keep Services Running (6 hours)
+        run: |
+          Write-Output "⏱️ Keeping workflow alive for 6 hours"
+
+          for ($i = 0; $i -lt 2160; $i++) {
             Start-Sleep -Seconds 10
+
+            if ((Get-Service TermService).Status -ne "Running") {
+              Start-Service TermService
+            }
+
+            if (-not (Get-Process bore -ErrorAction SilentlyContinue)) {
+              Start-Process .\bore.exe -ArgumentList "local","3389","--to","bore.pub" -NoNewWindow
+            }
           }
-          
-          try {
-            $tcpClient = New-Object System.Net.Sockets.TcpClient
-            $tcpClient.Connect("127.0.0.1", 3389)
-            $tcpClient.Close()
-            Write-Output "✅ Check $($i+1)/2160 - RDP port active"
-          } catch {
-            Write-Output "⚠️ RDP port test failed"
-          }
-        }        }
