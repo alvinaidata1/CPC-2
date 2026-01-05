@@ -20,21 +20,41 @@ jobs:
           netsh advfirewall firewall add rule name="RDP-Bore" dir=in action=allow protocol=TCP localport=3389
           Restart-Service TermService -Force
 
-      - name: Create RDP User
+      - name: Create RDP User (SIMPLE PASSWORD WORKS)
         run: |
-          $u = "${{ secrets.NAME }}"
-          $p = "${{ secrets.PASS }}"
-          $sp = ConvertTo-SecureString $p -AsPlainText -Force
+          $username = "${{ secrets.NAME }}"
+          $password = "${{ secrets.PASS }}"
 
-          if (-not (Get-LocalUser -Name $u -ErrorAction SilentlyContinue)) {
-            New-LocalUser $u -Password $sp -AccountNeverExpires
-          }
+          # Disable password policy
+          secedit /export /cfg $env:TEMP\secpol.cfg
+          (Get-Content $env:TEMP\secpol.cfg) `
+            -replace "PasswordComplexity = 1","PasswordComplexity = 0" `
+            -replace "MinimumPasswordLength = \d+","MinimumPasswordLength = 0" |
+            Set-Content $env:TEMP\secpol.cfg
 
-          Add-LocalGroupMember Administrators $u
-          Add-LocalGroupMember "Remote Desktop Users" $u
+          secedit /configure /db secedit.sdb /cfg $env:TEMP\secpol.cfg /areas SECURITYPOLICY
+          gpupdate /force
 
-          echo "RDP_USER=$u" >> $env:GITHUB_ENV
-          echo "RDP_PASS=$p" >> $env:GITHUB_ENV
+          # Remove user if already exists
+          net user $username /delete 2>$null
+
+          # Create user (accepts simple passwords)
+          net user $username $password /add
+          net localgroup Administrators $username /add
+          net localgroup "Remote Desktop Users" $username /add
+
+          echo "RDP_USER=$username" >> $env:GITHUB_ENV
+          echo "RDP_PASS=$password" >> $env:GITHUB_ENV
+
+      - name: Clean Azure / Assure / Unity Shortcuts
+        run: |
+          Get-ChildItem "C:\Users\Public\Desktop" |
+            Where-Object { $_.Name -match "Azure|Assure|Unity" } |
+            Remove-Item -Force -Recurse -ErrorAction SilentlyContinue
+
+          Get-ChildItem "C:\ProgramData\Microsoft\Windows\Start Menu\Programs" -Recurse |
+            Where-Object { $_.Name -match "Azure|Assure|Unity" } |
+            Remove-Item -Force -Recurse -ErrorAction SilentlyContinue
 
       - name: Install Bore
         run: |
@@ -47,14 +67,14 @@ jobs:
       - name: PRINT CONNECTION INFO (COPY THIS)
         run: |
           Write-Host ""
-          Write-Host "================ CONNECT ================="
+          Write-Host "============== CONNECT =============="
           Write-Host "BORE_PUB: ${{ secrets.BORE_SERVER }}:${{ secrets.BORE_PUBLIC_PORT }}"
           Write-Host ""
           Write-Host "mstsc /v:${{ secrets.BORE_SERVER }}:${{ secrets.BORE_PUBLIC_PORT }}"
           Write-Host ""
           Write-Host "Username: $env:RDP_USER"
           Write-Host "Password: $env:RDP_PASS"
-          Write-Host "=========================================="
+          Write-Host "====================================="
           Write-Host ""
 
       - name: Start Bore TCP Tunnel
@@ -66,6 +86,6 @@ jobs:
       - name: Maintain Connection
         run: |
           while ($true) {
-            Write-Host "[$(Get-Date)] RDP ACTIVE (BORE)"
+            Write-Host "[$(Get-Date)] RDP ACTIVE (BORE TCP)"
             Start-Sleep 300
           }
