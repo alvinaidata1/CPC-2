@@ -1,4 +1,4 @@
-name: WINDOWS RDP with Bore TCP
+name: RDP1
 
 on:
   workflow_dispatch:
@@ -6,72 +6,88 @@ on:
 jobs:
   secure-rdp:
     runs-on: windows-latest
+    timeout-minutes: 3600
 
     steps:
-      - name: Enhanced RDP Configuration
+      - name: Configure Core RDP Settings
         run: |
-          Write-Output "Configuring RDP with enhanced settings..."
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
+            -Name "fDenyTSConnections" -Value 0 -Force
 
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0 -Force
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "SecurityLayer" -Value 0 -Force
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "fAllowSecProtocolNegotiation" -Value 0 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
+            -Name "UserAuthentication" -Value 0 -Force
 
-          Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
-          Remove-NetFirewallRule -DisplayName "RDP-Custom" -ErrorAction SilentlyContinue
-          New-NetFirewallRule -DisplayName "RDP-Custom" -Direction Inbound -Protocol TCP -LocalPort 3389 -Action Allow
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
+            -Name "SecurityLayer" -Value 0 -Force
 
-          Set-Service -Name "TermService" -StartupType Automatic
-          Start-Service -Name "TermService"
+          netsh advfirewall firewall add rule name="RDP-ngrok" dir=in action=allow protocol=TCP localport=3389
+          Restart-Service -Name TermService -Force
 
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "TSEnabled" -Value 1 -Force
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "TSUserEnabled" -Value 1 -Force
-
-          Write-Output "✅ RDP configuration completed"
-
-      - name: Allow Simple Passwords
-        run: |
-          secedit /export /cfg secpol.cfg
-          (Get-Content secpol.cfg).Replace("PasswordComplexity = 1", "PasswordComplexity = 0") | Set-Content secpol.cfg
-          secedit /configure /db secpol.sdb /cfg secpol.cfg /areas SECURITYPOLICY
-
-      - name: Create RDP User
+      - name: Create RDP User from Secrets
         run: |
           $username = "${{ secrets.NAME }}"
           $password = "${{ secrets.PASS }}"
-          $securePassword = ConvertTo-SecureString $password -AsPlainText -Force
 
-          if (Get-LocalUser -Name $username -ErrorAction SilentlyContinue) {
-            Remove-LocalUser -Name $username -Force
+          secedit /export /cfg $env:TEMP\secpol.cfg
+          (Get-Content $env:TEMP\secpol.cfg).Replace("PasswordComplexity = 1","PasswordComplexity = 0") | Set-Content $env:TEMP\secpol.cfg
+          secedit /configure /db secedit.sdb /cfg $env:TEMP\secpol.cfg /areas SECURITYPOLICY
+          gpupdate /force
+
+          $securePass = ConvertTo-SecureString $password -AsPlainText -Force
+
+          if (-not (Get-LocalUser -Name $username -ErrorAction SilentlyContinue)) {
+            New-LocalUser -Name $username -Password $securePass -AccountNeverExpires
           }
 
-          New-LocalUser -Name $username -Password $securePassword -PasswordNeverExpires
           Add-LocalGroupMember -Group "Administrators" -Member $username
           Add-LocalGroupMember -Group "Remote Desktop Users" -Member $username
 
-          Write-Output "✅ User created"
+          $regPath = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon\SpecialAccounts\UserList"
+          New-Item -Path $regPath -Force | Out-Null
+          Get-LocalUser | ForEach-Object {
+            New-ItemProperty -Path $regPath -Name $_.Name -Value 0 -PropertyType DWord -Force
+          }
+          New-ItemProperty -Path $regPath -Name $username -Value 1 -PropertyType DWord -Force
 
-      - name: Download and Start Bore TCP Tunnel
-        shell: pwsh
+          echo "RDP_USER=$username" >> $env:GITHUB_ENV
+          echo "RDP_PASS=$password" >> $env:GITHUB_ENV
+
+      - name: Clean Azure / Assure / Unity Shortcuts
         run: |
-          Invoke-WebRequest https://github.com/ekzhang/bore/releases/download/v0.6.0/bore-v0.6.0-x86_64-pc-windows-msvc.zip -OutFile bore.zip
-          Expand-Archive bore.zip -DestinationPath . -Force
+          Get-ChildItem "C:\Users\Public\Desktop" | Where-Object { $_.Name -match "Azure|Assure|Unity" } | Remove-Item -Force -Recurse -ErrorAction SilentlyContinue
+          Get-ChildItem "C:\ProgramData\Microsoft\Windows\Start Menu\Programs" -Recurse | Where-Object { $_.Name -match "Azure|Assure|Unity" } | Remove-Item -Force -Recurse -ErrorAction SilentlyContinue
 
-          Start-Process .\bore.exe -ArgumentList "local","3389","--to","bore.pub" -NoNewWindow
+      # -------------------- NGROK PART --------------------
+
+      - name: Download ngrok
+        run: |
+          Invoke-WebRequest https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-windows-amd64.zip -OutFile ngrok.zip
+          Expand-Archive ngrok.zip -DestinationPath ngrok
+
+      - name: Configure ngrok
+        run: |
+          .\ngrok\ngrok.exe config add-authtoken $Env:NGROK_AUTH_TOKEN
+
+      - name: Start ngrok TCP tunnel for RDP
+        run: |
+          Start-Process -NoNewWindow -FilePath ".\ngrok\ngrok.exe" -ArgumentList "tcp 3389"
           Start-Sleep -Seconds 10
 
-      - name: Keep Services Running (6 hours)
+      - name: Fetch ngrok RDP Address
         run: |
-          Write-Output "⏱️ Keeping workflow alive for 6 hours"
+          $json = Invoke-RestMethod http://127.0.0.1:4040/api/tunnels
+          $addr = $json.tunnels[0].public_url.Replace("tcp://","")
+          echo "NGROK_ADDR=$addr" >> $env:GITHUB_ENV
 
-          for ($i = 0; $i -lt 2160; $i++) {
-            Start-Sleep -Seconds 10
+      - name: Maintain Connection
+        run: |
+          Write-Host "`n====== RDP READY ======"
+          Write-Host "Address  : $env:NGROK_ADDR"
+          Write-Host "Username : $env:RDP_USER"
+          Write-Host "Password : $env:RDP_PASS"
+          Write-Host "=======================`n"
 
-            if ((Get-Service TermService).Status -ne "Running") {
-              Start-Service TermService
-            }
-
-            if (-not (Get-Process bore -ErrorAction SilentlyContinue)) {
-              Start-Process .\bore.exe -ArgumentList "local","3389","--to","bore.pub" -NoNewWindow
-            }
+          while ($true) {
+            Write-Host "[$(Get-Date)] RDP active via ngrok"
+            Start-Sleep -Seconds 300
           }
