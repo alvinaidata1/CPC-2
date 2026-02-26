@@ -322,23 +322,6 @@ jobs:
           }
           Write-Host "TCP connectivity successful!"
 
-      - name: Maintain Connection Window
-        shell: pwsh
-        run: |
-          Write-Host "`n=== RDP ACCESS ==="
-          Write-Host "Address: $env:TAILSCALE_IP"
-          Write-Host "Username: $(${env:RDP_CREDS}.Split('|')[0].Split(':')[1].Trim())"
-          Write-Host "Password: $(${env:RDP_CREDS}.Split('|')[1].Split(':')[1].Trim())"
-          Write-Host "==================`n"
-
-          $endTime = (Get-Date).AddMinutes(330)
-          while ((Get-Date) -lt $endTime) {
-            Write-Host "[$(Get-Date)] RDP Active - Cancel the workflow to terminate early"
-            Start-Sleep -Seconds 300
-          }
-
-          Write-Host "Connection window complete. Proceeding to backup artifacts."
-
       - name: Prepare Desktop backup artifact
         if: always()
         shell: pwsh
@@ -403,3 +386,20 @@ jobs:
           path: ${{ runner.temp }}\artifacts\edge-profile-backup.zip
           if-no-files-found: ignore
           retention-days: 3
+
+      - name: Maintain Connection Window
+        shell: pwsh
+        run: |
+          Write-Host "`n=== RDP ACCESS ==="
+          Write-Host "Address: $env:TAILSCALE_IP"
+          Write-Host "Username: $(${env:RDP_CREDS}.Split('|')[0].Split(':')[1].Trim())"
+          Write-Host "Password: $(${env:RDP_CREDS}.Split('|')[1].Split(':')[1].Trim())"
+          Write-Host "==================`n"
+
+          $endTime = (Get-Date).AddMinutes(330)
+          while ((Get-Date) -lt $endTime) {
+            Write-Host "[$(Get-Date)] RDP Active - Cancel the workflow to terminate early"
+            Start-Sleep -Seconds 300
+          }
+
+          Write-Host "Connection window complete."
