@@ -269,14 +269,12 @@ jobs:
 
           Set-Content -Path $scriptPath -Value $script -Encoding UTF8
 
-          $taskName = "RDP-Session-Bootstrap"
-          $taskUser = ".\$($env:RDP_USERNAME)"
+          $startupDir = "C:\Users\$env:RDP_USERNAME\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Startup"
+          New-Item -Path $startupDir -ItemType Directory -Force | Out-Null
 
-          Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue | Out-Null
-
-          $action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$scriptPath`""
-          $trigger = New-ScheduledTaskTrigger -AtLogOn -User $taskUser
-          Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -User $taskUser -Password $env:RDP_PASSWORD -RunLevel Highest -Force | Out-Null
+          $launcherPath = Join-Path $startupDir "RDP-Session-Bootstrap.cmd"
+          $launcher = "@echo off`r`npowershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$scriptPath`"`r`n"
+          Set-Content -Path $launcherPath -Value $launcher -Encoding ASCII
 
       - name: Clean Azure/Assure/Unity Shortcuts
         shell: pwsh
