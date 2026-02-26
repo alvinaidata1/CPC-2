@@ -74,18 +74,55 @@ jobs:
             throw "winget is not available on this runner."
           }
 
-          $packages = @(
-            "Microsoft.VisualStudioCode",
-            "Axosoft.GitKraken"
+          $commonArgs = @(
+            "--exact",
+            "--source", "winget",
+            "--silent",
+            "--accept-package-agreements",
+            "--accept-source-agreements",
+            "--disable-interactivity"
           )
 
-          foreach ($pkg in $packages) {
-            Write-Host "Installing $pkg..."
-            winget install --id $pkg --exact --scope machine --silent --accept-package-agreements --accept-source-agreements --disable-interactivity
-            if ($LASTEXITCODE -ne 0) {
-              Write-Host "winget install for $pkg returned $LASTEXITCODE. Continuing."
-            }
+          function Invoke-WingetInstall {
+            param(
+              [Parameter(Mandatory = $true)][string]$Id,
+              [string[]]$ExtraArgs = @()
+            )
+            & winget install --id $Id @commonArgs @ExtraArgs
+            $code = $LASTEXITCODE
+            $global:LASTEXITCODE = 0
+            return $code
           }
+
+          Write-Host "Installing Microsoft.VisualStudioCode..."
+          $vsCodeExit = Invoke-WingetInstall -Id "Microsoft.VisualStudioCode" -ExtraArgs @("--scope", "machine")
+          if ($vsCodeExit -ne 0) {
+            throw "VS Code install failed with exit code $vsCodeExit."
+          }
+
+          $gitKrakenInstalled = $false
+          $gitKrakenAttempts = @(
+            @{ Id = "GitKraken.GitKraken"; Extra = @("--scope", "machine") },
+            @{ Id = "GitKraken.GitKraken"; Extra = @() },
+            @{ Id = "Axosoft.GitKraken";   Extra = @("--scope", "machine") },
+            @{ Id = "Axosoft.GitKraken";   Extra = @() }
+          )
+
+          foreach ($attempt in $gitKrakenAttempts) {
+            Write-Host "Installing $($attempt.Id) with args: $($attempt.Extra -join ' ')"
+            $exitCode = Invoke-WingetInstall -Id $attempt.Id -ExtraArgs $attempt.Extra
+            if ($exitCode -eq 0) {
+              $gitKrakenInstalled = $true
+              break
+            }
+            Write-Host "Install attempt failed with exit code $exitCode. Trying next option."
+          }
+
+          if (-not $gitKrakenInstalled) {
+            Write-Warning "GitKraken could not be installed from winget in this runner image."
+          }
+
+          exit 0
 
       - name: Restore Desktop and Edge profile from previous run
         shell: pwsh
