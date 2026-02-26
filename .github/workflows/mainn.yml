@@ -1,89 +1,345 @@
-name: RDP1
+name: RDP2
 
 on:
   workflow_dispatch:
 
+permissions:
+  actions: read
+  contents: read
+
 jobs:
   secure-rdp:
     runs-on: windows-latest
-    timeout-minutes: 3600
+    timeout-minutes: 350
+    env:
+      RDP_USERNAME: ${{ secrets.NAME }}
+      RDP_PASSWORD: ${{ secrets.PASS }}
+      TS_AUTH_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
+      DESKTOP_ARTIFACT_NAME: rdp-desktop-backup
+      EDGE_ARTIFACT_NAME: rdp-edge-profile-backup
 
     steps:
-      - name: Force-enable RDP (max compatibility)
+      - name: Configure Core RDP Settings
+        shell: pwsh
         run: |
-          reg add "HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server" /v fDenyTSConnections /t REG_DWORD /d 0 /f
-          reg add "HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server" /v fSingleSessionPerUser /t REG_DWORD /d 0 /f
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
+                             -Name "fDenyTSConnections" -Value 0 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
+                             -Name "UserAuthentication" -Value 0 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
+                             -Name "SecurityLayer" -Value 0 -Force
+          netsh advfirewall firewall delete rule name="RDP-Tailscale"
+          netsh advfirewall firewall add rule name="RDP-Tailscale" dir=in action=allow protocol=TCP localport=3389
+          Restart-Service -Name TermService -Force
 
-          reg add "HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" /v fEnableWinStation /t REG_DWORD /d 1 /f
-          reg add "HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" /v UserAuthentication /t REG_DWORD /d 0 /f
-          reg add "HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" /v SecurityLayer /t REG_DWORD /d 0 /f
-          reg add "HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" /v AuthenticationLevel /t REG_DWORD /d 0 /f
-          reg add "HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" /v MinEncryptionLevel /t REG_DWORD /d 1 /f
-          reg add "HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" /v PortNumber /t REG_DWORD /d 3389 /f
-
-          reg add "HKLM\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services" /v fClientDisableUDP /t REG_DWORD /d 1 /f
-
-          netsh advfirewall firewall add rule name="RDP-ngrok" dir=in action=allow protocol=TCP localport=3389
-
-          Restart-Service TermService -Force
-
-      - name: Create RDP user
+      - name: Create RDP User from Secrets
+        shell: pwsh
         run: |
-          $u = "${{ secrets.NAME }}"
-          $p = "${{ secrets.PASS }}"
+          $username = $env:RDP_USERNAME
+          $password = $env:RDP_PASSWORD
 
           secedit /export /cfg $env:TEMP\secpol.cfg
-          (Get-Content $env:TEMP\secpol.cfg).Replace("PasswordComplexity = 1","PasswordComplexity = 0") | Set-Content $env:TEMP\secpol.cfg
+          (Get-Content $env:TEMP\secpol.cfg).Replace("PasswordComplexity = 1", "PasswordComplexity = 0") | Set-Content $env:TEMP\secpol.cfg
           secedit /configure /db secedit.sdb /cfg $env:TEMP\secpol.cfg /areas SECURITYPOLICY
           gpupdate /force
 
-          $sp = ConvertTo-SecureString $p -AsPlainText -Force
-
-          if (-not (Get-LocalUser -Name $u -ErrorAction SilentlyContinue)) {
-            New-LocalUser -Name $u -Password $sp -AccountNeverExpires
+          $securePass = ConvertTo-SecureString $password -AsPlainText -Force
+          if (-not (Get-LocalUser -Name $username -ErrorAction SilentlyContinue)) {
+              New-LocalUser -Name $username -Password $securePass -AccountNeverExpires
           }
 
-          Add-LocalGroupMember Administrators $u
-          Add-LocalGroupMember "Remote Desktop Users" $u
+          Add-LocalGroupMember -Group "Administrators" -Member $username -ErrorAction SilentlyContinue
+          Add-LocalGroupMember -Group "Remote Desktop Users" -Member $username -ErrorAction SilentlyContinue
 
-          echo "RDP_USER=$u" >> $env:GITHUB_ENV
-          echo "RDP_PASS=$p" >> $env:GITHUB_ENV
+          if (Get-LocalUser -Name "RDP" -ErrorAction SilentlyContinue) {
+              Remove-LocalUser -Name "RDP"
+          }
 
-      - name: Download ngrok
+          $regPath = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon\SpecialAccounts\UserList"
+          if (-not (Test-Path $regPath)) {
+              New-Item -Path $regPath -Force | Out-Null
+          }
+
+          Get-LocalUser | ForEach-Object {
+              New-ItemProperty -Path $regPath -Name $_.Name -Value 0 -PropertyType DWord -Force
+          }
+          New-ItemProperty -Path $regPath -Name $username -Value 1 -PropertyType DWord -Force
+
+          echo "RDP_CREDS=User: $username | Password: $password" >> $env:GITHUB_ENV
+
+      - name: Install VS Code and GitKraken
+        shell: pwsh
         run: |
-          Invoke-WebRequest https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-windows-amd64.zip -OutFile ngrok.zip
-          Expand-Archive ngrok.zip ngrok
+          if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
+            throw "winget is not available on this runner."
+          }
 
-      - name: Configure ngrok
+          $packages = @(
+            "Microsoft.VisualStudioCode",
+            "Axosoft.GitKraken"
+          )
+
+          foreach ($pkg in $packages) {
+            Write-Host "Installing $pkg..."
+            winget install --id $pkg --exact --scope machine --silent --accept-package-agreements --accept-source-agreements --disable-interactivity
+            if ($LASTEXITCODE -ne 0) {
+              Write-Host "winget install for $pkg returned $LASTEXITCODE. Continuing."
+            }
+          }
+
+      - name: Restore Desktop and Edge profile from previous run
+        shell: pwsh
         env:
-          NGROK_AUTH_TOKEN: ${{ secrets.NGROK_AUTH_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
         run: |
-          .\ngrok\ngrok.exe config add-authtoken $env:NGROK_AUTH_TOKEN
-
-      - name: Start ngrok TCP tunnel
-        run: |
-          Start-Process -NoNewWindow `
-            -FilePath ".\ngrok\ngrok.exe" `
-            -ArgumentList "tcp 3389 --log=stdout --log-format=json" `
-            -RedirectStandardOutput ngrok.log
-          Start-Sleep -Seconds 20
-
-      - name: Extract ngrok address
-        run: |
-          $line = Get-Content ngrok.log | Select-String '"url":"tcp://'
-          $addr = ($line -split '"url":"')[1].Split('"')[0].Replace("tcp://","")
-          echo "NGROK_ADDR=$addr" >> $env:GITHUB_ENV
-
-      - name: Keep alive
-        run: |
-          Write-Host ""
-          Write-Host "====== RDP READY ======"
-          Write-Host "Address  : $env:NGROK_ADDR"
-          Write-Host "Username : .\$env:RDP_USER"
-          Write-Host "Password : $env:RDP_PASS"
-          Write-Host "======================="
-          Write-Host ""
-
-          while ($true) {
-            Start-Sleep 300
+          if (-not (Get-Command gh -ErrorAction SilentlyContinue)) {
+            Write-Host "gh CLI not found. Skipping artifact restore."
+            exit 0
           }
+
+          $restoreRoot = Join-Path $env:RUNNER_TEMP "restore"
+          if (Test-Path $restoreRoot) { Remove-Item $restoreRoot -Recurse -Force }
+          New-Item -Path $restoreRoot -ItemType Directory -Force | Out-Null
+
+          $runs = gh run list --workflow "$env:GITHUB_WORKFLOW" --branch "$env:GITHUB_REF_NAME" --limit 30 --json databaseId,conclusion | ConvertFrom-Json
+          $prev = $runs | Where-Object { $_.databaseId -ne [int64]$env:GITHUB_RUN_ID -and $_.conclusion -eq "success" } | Select-Object -First 1
+
+          if (-not $prev) {
+            Write-Host "No previous successful run found; nothing to restore."
+            exit 0
+          }
+
+          $runId = $prev.databaseId
+          Write-Host "Using run $runId for restore."
+
+          foreach ($artifactName in @($env:DESKTOP_ARTIFACT_NAME, $env:EDGE_ARTIFACT_NAME)) {
+            try {
+              gh run download $runId -n $artifactName -D $restoreRoot | Out-Null
+              Write-Host "Downloaded artifact: $artifactName"
+            } catch {
+              Write-Host "Artifact '$artifactName' not found in run $runId."
+            }
+          }
+
+          $desktopZip = Get-ChildItem -Path $restoreRoot -Recurse -Filter "desktop-backup.zip" -ErrorAction SilentlyContinue | Select-Object -First 1
+          if ($desktopZip) {
+            $desktopPath = "C:\Users\$env:RDP_USERNAME\Desktop"
+            New-Item -Path $desktopPath -ItemType Directory -Force | Out-Null
+            Get-ChildItem -Path $desktopPath -Force -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+            Expand-Archive -Path $desktopZip.FullName -DestinationPath $desktopPath -Force
+            Remove-Item -Path (Join-Path $desktopPath ".keep") -Force -ErrorAction SilentlyContinue
+            Write-Host "Restored Desktop files."
+          } else {
+            Write-Host "No Desktop backup zip found."
+          }
+
+          $edgeZip = Get-ChildItem -Path $restoreRoot -Recurse -Filter "edge-profile-backup.zip" -ErrorAction SilentlyContinue | Select-Object -First 1
+          if ($edgeZip) {
+            $edgePath = "C:\Users\$env:RDP_USERNAME\AppData\Local\Microsoft\Edge\User Data"
+            if (Test-Path $edgePath) {
+              Remove-Item -Path $edgePath -Recurse -Force -ErrorAction SilentlyContinue
+            }
+            New-Item -Path $edgePath -ItemType Directory -Force | Out-Null
+            Expand-Archive -Path $edgeZip.FullName -DestinationPath $edgePath -Force
+            Write-Host "Restored Edge profile (best effort)."
+          } else {
+            Write-Host "No Edge profile backup zip found."
+          }
+
+      - name: Configure login bootstrap (pin + open pages)
+        shell: pwsh
+        run: |
+          $scriptPath = "C:\ProgramData\RDP-Session-Bootstrap.ps1"
+          $script = @'
+          Start-Sleep -Seconds 12
+
+          function Get-AppPath {
+            param([string[]]$Candidates)
+            foreach ($candidate in $Candidates) {
+              if (Test-Path $candidate) { return $candidate }
+            }
+            return $null
+          }
+
+          function Pin-ToTaskbar {
+            param([string]$AppPath)
+            if (-not $AppPath -or -not (Test-Path $AppPath)) { return }
+            try {
+              $shell = New-Object -ComObject Shell.Application
+              $folder = $shell.Namespace((Split-Path $AppPath))
+              $item = $folder.ParseName((Split-Path $AppPath -Leaf))
+              $verb = $item.Verbs() |
+                Where-Object { (($_.Name -replace "&","").Trim()) -match "^Pin to taskbar$" } |
+                Select-Object -First 1
+              if ($verb) { $verb.DoIt() }
+            } catch {
+              Write-Host "Pinning failed for $AppPath: $($_.Exception.Message)"
+            }
+          }
+
+          $vscode = Get-AppPath -Candidates @(
+            "C:\Program Files\Microsoft VS Code\Code.exe",
+            "C:\Program Files (x86)\Microsoft VS Code\Code.exe"
+          )
+
+          $gitkraken = Get-AppPath -Candidates @(
+            "C:\Program Files\GitKraken\gitkraken.exe",
+            "C:\Program Files\GitKraken\GitKraken.exe"
+          )
+
+          $edge = Get-AppPath -Candidates @(
+            "C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+            "C:\Program Files\Microsoft\Edge\Application\msedge.exe"
+          )
+
+          Pin-ToTaskbar -AppPath $vscode
+          Pin-ToTaskbar -AppPath $gitkraken
+
+          if ($edge) {
+            Start-Process -FilePath $edge -ArgumentList @(
+              "--new-window",
+              "https://github.com/login",
+              "https://discord.com/login",
+              "https://accounts.google.com/signin"
+            )
+          }
+          '@
+
+          Set-Content -Path $scriptPath -Value $script -Encoding UTF8
+
+          $taskName = "RDP-Session-Bootstrap"
+          $taskUser = ".\$($env:RDP_USERNAME)"
+
+          Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue | Out-Null
+
+          $action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$scriptPath`""
+          $trigger = New-ScheduledTaskTrigger -AtLogOn -User $taskUser
+          Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -User $taskUser -Password $env:RDP_PASSWORD -RunLevel Highest -Force | Out-Null
+
+      - name: Clean Azure/Assure/Unity Shortcuts
+        shell: pwsh
+        run: |
+          Get-ChildItem "C:\Users\Public\Desktop" | Where-Object { $_.Name -match "Azure|Assure|Unity" } | Remove-Item -Force -Recurse -ErrorAction SilentlyContinue
+          Get-ChildItem "C:\ProgramData\Microsoft\Windows\Start Menu\Programs" -Recurse | Where-Object { $_.Name -match "Azure|Assure|Unity" } | Remove-Item -Force -Recurse -ErrorAction SilentlyContinue
+
+      - name: Install Tailscale
+        shell: pwsh
+        run: |
+          $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
+          $installerPath = "$env:TEMP\tailscale.msi"
+          Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath
+          Start-Process msiexec.exe -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" -Wait
+          Remove-Item $installerPath -Force
+
+      - name: Establish Tailscale Connection
+        shell: pwsh
+        run: |
+          & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=$env:TS_AUTH_KEY --hostname=gh-runner-$env:GITHUB_RUN_ID
+
+          $tsIP = $null
+          $retries = 0
+          while (-not $tsIP -and $retries -lt 10) {
+            $tsIP = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
+            Start-Sleep -Seconds 5
+            $retries++
+          }
+
+          if (-not $tsIP) {
+            Write-Error "Tailscale IP not assigned. Exiting."
+            exit 1
+          }
+
+          echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
+
+      - name: Verify RDP Accessibility
+        shell: pwsh
+        run: |
+          Write-Host "Tailscale IP: $env:TAILSCALE_IP"
+          $testResult = Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port 3389
+          if (-not $testResult.TcpTestSucceeded) {
+            Write-Error "TCP 3389 failed"
+            exit 1
+          }
+          Write-Host "TCP connectivity successful!"
+
+      - name: Maintain Connection Window
+        shell: pwsh
+        run: |
+          Write-Host "`n=== RDP ACCESS ==="
+          Write-Host "Address: $env:TAILSCALE_IP"
+          Write-Host "Username: $(${env:RDP_CREDS}.Split('|')[0].Split(':')[1].Trim())"
+          Write-Host "Password: $(${env:RDP_CREDS}.Split('|')[1].Split(':')[1].Trim())"
+          Write-Host "==================`n"
+
+          $endTime = (Get-Date).AddMinutes(330)
+          while ((Get-Date) -lt $endTime) {
+            Write-Host "[$(Get-Date)] RDP Active - Cancel the workflow to terminate early"
+            Start-Sleep -Seconds 300
+          }
+
+          Write-Host "Connection window complete. Proceeding to backup artifacts."
+
+      - name: Prepare Desktop backup artifact
+        if: always()
+        shell: pwsh
+        run: |
+          $artifactRoot = Join-Path $env:RUNNER_TEMP "artifacts"
+          $desktopStage = Join-Path $artifactRoot "desktop"
+          $desktopZip = Join-Path $artifactRoot "desktop-backup.zip"
+          $desktopPath = "C:\Users\$env:RDP_USERNAME\Desktop"
+
+          if (Test-Path $artifactRoot) { Remove-Item $artifactRoot -Recurse -Force }
+          New-Item -Path $desktopStage -ItemType Directory -Force | Out-Null
+
+          if (Test-Path $desktopPath) {
+            Copy-Item -Path (Join-Path $desktopPath "*") -Destination $desktopStage -Recurse -Force -ErrorAction SilentlyContinue
+          }
+
+          if (-not (Get-ChildItem -Path $desktopStage -Force | Select-Object -First 1)) {
+            Set-Content -Path (Join-Path $desktopStage ".keep") -Value "empty desktop"
+          }
+
+          Compress-Archive -Path (Join-Path $desktopStage "*") -DestinationPath $desktopZip -Force
+
+      - name: Upload Desktop backup artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.DESKTOP_ARTIFACT_NAME }}
+          path: ${{ runner.temp }}\artifacts\desktop-backup.zip
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Prepare Edge profile artifact (best effort)
+        if: always()
+        shell: pwsh
+        run: |
+          $artifactRoot = Join-Path $env:RUNNER_TEMP "artifacts"
+          $edgeStage = Join-Path $artifactRoot "edge-profile"
+          $edgeZip = Join-Path $artifactRoot "edge-profile-backup.zip"
+          $edgePath = "C:\Users\$env:RDP_USERNAME\AppData\Local\Microsoft\Edge\User Data"
+
+          Stop-Process -Name msedge -Force -ErrorAction SilentlyContinue
+
+          if (Test-Path $edgeStage) { Remove-Item $edgeStage -Recurse -Force -ErrorAction SilentlyContinue }
+          New-Item -Path $edgeStage -ItemType Directory -Force | Out-Null
+
+          if (Test-Path $edgePath) {
+            Copy-Item -Path (Join-Path $edgePath "*") -Destination $edgeStage -Recurse -Force -ErrorAction SilentlyContinue
+            if (Get-ChildItem -Path $edgeStage -Force | Select-Object -First 1) {
+              Compress-Archive -Path (Join-Path $edgeStage "*") -DestinationPath $edgeZip -Force
+            } else {
+              Write-Host "Edge profile folder is empty."
+            }
+          } else {
+            Write-Host "Edge profile folder not found."
+          }
+
+      - name: Upload Edge profile artifact (best effort)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.EDGE_ARTIFACT_NAME }}
+          path: ${{ runner.temp }}\artifacts\edge-profile-backup.zip
+          if-no-files-found: ignore
+          retention-days: 3
