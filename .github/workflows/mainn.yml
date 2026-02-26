@@ -74,6 +74,21 @@ jobs:
             throw "winget is not available on this runner."
           }
 
+          $vscodeCandidates = @(
+            "C:\Program Files\Microsoft VS Code\Code.exe",
+            "C:\Program Files (x86)\Microsoft VS Code\Code.exe"
+          )
+          $gitKrakenCandidates = @(
+            "C:\Program Files\GitKraken\gitkraken.exe",
+            "C:\Program Files\GitKraken\GitKraken.exe",
+            "C:\Users\$env:RDP_USERNAME\AppData\Local\gitkraken\gitkraken.exe"
+          )
+
+          function Test-AppInstalled {
+            param([string[]]$Candidates)
+            return [bool]($Candidates | Where-Object { Test-Path $_ } | Select-Object -First 1)
+          }
+
           $commonArgs = @(
             "--exact",
             "--source", "winget",
@@ -88,16 +103,25 @@ jobs:
               [Parameter(Mandatory = $true)][string]$Id,
               [string[]]$ExtraArgs = @()
             )
-            & winget install --id $Id @commonArgs @ExtraArgs
+            $output = & winget install --id $Id @commonArgs @ExtraArgs 2>&1
             $code = $LASTEXITCODE
+            foreach ($line in $output) {
+              Write-Host $line
+            }
             $global:LASTEXITCODE = 0
-            return $code
+            return [int]$code
           }
 
           Write-Host "Installing Microsoft.VisualStudioCode..."
           $vsCodeExit = Invoke-WingetInstall -Id "Microsoft.VisualStudioCode" -ExtraArgs @("--scope", "machine")
-          if ($vsCodeExit -ne 0) {
-            throw "VS Code install failed with exit code $vsCodeExit."
+          $vsCodeInstalled = Test-AppInstalled -Candidates $vscodeCandidates
+          if ($vsCodeExit -ne 0 -and -not $vsCodeInstalled) {
+            throw "VS Code install failed with exit code $vsCodeExit and executable was not found."
+          }
+          if ($vsCodeInstalled) {
+            Write-Host "VS Code is available."
+          } else {
+            Write-Warning "VS Code install exit code was 0 but executable path was not found."
           }
 
           $gitKrakenInstalled = $false
@@ -111,7 +135,8 @@ jobs:
           foreach ($attempt in $gitKrakenAttempts) {
             Write-Host "Installing $($attempt.Id) with args: $($attempt.Extra -join ' ')"
             $exitCode = Invoke-WingetInstall -Id $attempt.Id -ExtraArgs $attempt.Extra
-            if ($exitCode -eq 0) {
+            $gitKrakenInstalled = Test-AppInstalled -Candidates $gitKrakenCandidates
+            if ($exitCode -eq 0 -or $gitKrakenInstalled) {
               $gitKrakenInstalled = $true
               break
             }
