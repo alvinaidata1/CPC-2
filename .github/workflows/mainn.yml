@@ -10,7 +10,7 @@ permissions:
 jobs:
   secure-rdp:
     runs-on: windows-latest
-    timeout-minutes: 350
+    timeout-minutes: 6500
     env:
       RDP_USERNAME: ${{ secrets.NAME }}
       RDP_PASSWORD: ${{ secrets.PASS }}
